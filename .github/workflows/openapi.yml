@@ -1,0 +1,32 @@
+name: OpenAPI
+
+on:
+  push:
+    branches: ["main", "master"]
+  pull_request:
+  release:
+    types: [published]
+
+jobs:
+  openapi:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install API deps
+        working-directory: apps/api
+        run: npm install
+      - name: Build OpenAPI Specs
+        working-directory: apps/api
+        run: npm run openapi:build
+      - name: Validate OpenAPI Specs
+        working-directory: apps/api
+        run: npm run openapi:validate
+      - name: Upload OpenAPI Artifacts
+        if: ${{ !env.ACT }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: openapi-specs
+          path: site/openapi

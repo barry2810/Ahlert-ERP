@@ -1,0 +1,11 @@
+.env
+.tools/
+.local/
+
+postgres-data/
+redis-data/
+caddy-data/
+
+import/
+
+*.log

@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="de">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Ahlert ERP API Docs</title>
+    <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css" />
+    <style>
+      body { margin: 0; background: #f8fafc; }
+      .topbar { display: none; }
+      .toolbar { padding: 16px; border-bottom: 1px solid #cbd5e1; background: #fff; font-family: Arial, sans-serif; }
+      .toolbar label { font-size: 14px; font-weight: 600; margin-right: 8px; }
+      .toolbar select { min-height: 40px; min-width: 160px; }
+    </style>
+  </head>
+  <body>
+    <div class="toolbar">
+      <label for="spec-version">API-Version</label>
+      <select id="spec-version">
+        <option value="v2">v2</option>
+        <option value="v1">v1 (deprecated)</option>
+      </select>
+    </div>
+    <div id="swagger-ui"></div>
+    <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+    <script>
+      const select = document.getElementById("spec-version");
+      const queryVersion = new URLSearchParams(location.search).get("version");
+      if (queryVersion === "v1" || queryVersion === "v2") select.value = queryVersion;
+      let ui = null;
+      function render(version) {
+        const url = `/api/docs/openapi/${version}.json`;
+        ui = SwaggerUIBundle({
+          url,
+          dom_id: "#swagger-ui",
+          deepLinking: true,
+          presets: [SwaggerUIBundle.presets.apis],
+        });
+        history.replaceState(null, "", `?version=${encodeURIComponent(version)}`);
+      }
+      select.addEventListener("change", () => render(select.value));
+      render(select.value);
+    </script>
+  </body>
+</html>

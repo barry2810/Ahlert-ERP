@@ -1,0 +1,92 @@
+services:
+  postgres:
+    image: public.ecr.aws/docker/library/postgres:16
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - ./postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: public.ecr.aws/docker/library/redis:7
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD}"]
+    volumes:
+      - ./redis-data:/data
+    restart: unless-stopped
+
+  api:
+#   image: ghcr.io/ahlert/erp-api:latest
+#   environment:
+#   DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+#   REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+#   PUBLIC_BASE_URL: ${PUBLIC_BASE_URL}
+    build: ./apps/api
+    volumes:
+      - ./import:/import:ro
+    environment:
+      PORT: 3000
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL}
+      ERP_ALLOW_INSECURE_HEADERS: "true"
+      ERP_HTTPS_PROXY: ${ERP_HTTPS_PROXY}
+      ERP_EXTRA_CA_PEM_PATH: ${ERP_EXTRA_CA_PEM_PATH}
+      ERP_EXTRA_CA_PEM_BASE64: ${ERP_EXTRA_CA_PEM_BASE64}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    restart: unless-stopped
+
+  worker:
+    build: ./apps/api
+    command: ["node", "/app/server.mjs", "worker"]
+    volumes:
+      - ./import:/import:ro
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL}
+      ERP_ALLOW_INSECURE_HEADERS: "true"
+      ERP_HTTPS_PROXY: ${ERP_HTTPS_PROXY}
+      ERP_EXTRA_CA_PEM_PATH: ${ERP_EXTRA_CA_PEM_PATH}
+      ERP_EXTRA_CA_PEM_BASE64: ${ERP_EXTRA_CA_PEM_BASE64}
+      ERP_WORKER_ID: worker-1
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    restart: unless-stopped
+
+# web:
+#    image: ghcr.io/ahlert/erp-web:latest
+#    environment:
+#      NEXT_PUBLIC_BASE_URL: ${PUBLIC_BASE_URL}
+#      API_BASE_URL: http://api:3000
+#    depends_on:
+#      - api
+#    restart: unless-stopped
+
+  caddy:
+    image: public.ecr.aws/docker/library/caddy:2
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - ./site:/srv
+      - ./caddy-data:/data
+    depends_on:
+      - api
+#      - web
+    restart: unless-stopped

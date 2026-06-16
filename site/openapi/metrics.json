@@ -1,0 +1,14 @@
+{
+  "documentedRouteCount": 53,
+  "implementedRouteCount": 53,
+  "matchedRouteCount": 53,
+  "docCoveragePct": 100,
+  "parallelVersionsSupported": 2,
+  "deprecatedVersions": [
+    "v1"
+  ],
+  "integrationRiskReduction": {
+    "before": "Unversionierte und nur implizit dokumentierte Schnittstellen erhoehen Migrations- und Integrationsrisiken.",
+    "after": "Versionierte Spezifikationen, Deprecation-Hinweise und validierte Doku machen Releases planbar und reduzieren Breaking-Change-Risiken."
+  }
+}

@@ -1,0 +1,1756 @@
+<!doctype html>
+<html lang="de">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Ahlert ERP – Tablet UI</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+  </head>
+  <body class="min-h-screen bg-slate-50 text-slate-900">
+    <div id="modal" class="fixed inset-0 z-50 hidden">
+      <div id="modal-backdrop" class="absolute inset-0 bg-black/40"></div>
+      <div class="absolute inset-x-3 top-10 mx-auto max-w-3xl rounded-2xl bg-white shadow-xl">
+        <div class="flex items-center justify-between border-b px-4 py-3">
+          <div id="modal-title" class="text-sm font-semibold">—</div>
+          <button id="modal-close" class="min-h-[44px] rounded-lg px-3 text-sm font-medium hover:bg-slate-100">Schließen</button>
+        </div>
+        <div id="modal-body" class="max-h-[70vh] overflow-auto px-4 py-4"></div>
+      </div>
+    </div>
+
+    <header class="sticky top-0 z-40 border-b bg-white/90 backdrop-blur">
+      <div class="mx-auto flex max-w-7xl items-center gap-2 px-3 py-3 sm:px-4">
+        <div class="flex items-center gap-2">
+          <div class="rounded-lg bg-slate-900 px-2 py-1 text-xs font-semibold text-white">ERP</div>
+          <div class="text-sm font-semibold">Leitstand</div>
+        </div>
+
+        <nav class="ml-2 flex flex-1 items-center gap-2 overflow-auto">
+          <button data-view="dashboard" class="nav-btn min-h-[44px] whitespace-nowrap rounded-xl border bg-white px-3 text-sm font-medium">Dashboard</button>
+          <button data-view="disposition" class="nav-btn min-h-[44px] whitespace-nowrap rounded-xl border bg-white px-3 text-sm font-medium">Disposition</button>
+          <button data-view="customers" class="nav-btn min-h-[44px] whitespace-nowrap rounded-xl border bg-white px-3 text-sm font-medium">Kunden</button>
+          <button data-view="contracts" class="nav-btn min-h-[44px] whitespace-nowrap rounded-xl border bg-white px-3 text-sm font-medium">Verträge</button>
+          <button data-view="pricing" class="nav-btn min-h-[44px] whitespace-nowrap rounded-xl border bg-white px-3 text-sm font-medium">Pricing</button>
+          <button data-view="pool" class="nav-btn min-h-[44px] whitespace-nowrap rounded-xl border bg-white px-3 text-sm font-medium">Pool</button>
+          <button data-view="slotplan" class="nav-btn min-h-[44px] whitespace-nowrap rounded-xl border bg-white px-3 text-sm font-medium">Slotplan</button>
+          <button data-view="lager" class="nav-btn min-h-[44px] whitespace-nowrap rounded-xl border bg-white px-3 text-sm font-medium">Lager</button>
+          <button data-view="pruefungen" class="nav-btn min-h-[44px] whitespace-nowrap rounded-xl border bg-white px-3 text-sm font-medium">Prüfungen</button>
+        </nav>
+
+        <button id="btn-settings" class="min-h-[44px] rounded-xl border bg-white px-3 text-sm font-medium">Zugang</button>
+      </div>
+    </header>
+
+    <main class="mx-auto max-w-7xl px-3 py-4 sm:px-4">
+      <section id="view-dashboard" class="view space-y-4">
+        <div class="grid grid-cols-1 gap-3 lg:grid-cols-3">
+          <div class="rounded-2xl border bg-white p-4">
+            <div class="text-xs font-medium text-slate-500">Workshop</div>
+            <div id="dash-kpi-workshop" class="mt-2 text-2xl font-semibold">—</div>
+            <div id="dash-kpi-workshop-sub" class="mt-1 text-xs text-slate-500">—</div>
+          </div>
+          <div class="rounded-2xl border bg-white p-4">
+            <div class="text-xs font-medium text-slate-500">SLA (30 Tage)</div>
+            <div id="dash-kpi-sla" class="mt-2 text-2xl font-semibold">—</div>
+            <div id="dash-kpi-sla-sub" class="mt-1 text-xs text-slate-500">—</div>
+          </div>
+          <div class="rounded-2xl border bg-white p-4">
+            <div class="text-xs font-medium text-slate-500">Prüf-Compliance (30 Tage)</div>
+            <div id="dash-kpi-insp" class="mt-2 text-2xl font-semibold">—</div>
+            <div id="dash-kpi-insp-sub" class="mt-1 text-xs text-slate-500">—</div>
+          </div>
+        </div>
+
+        <div class="grid grid-cols-1 gap-3 lg:grid-cols-12">
+          <div class="rounded-2xl border bg-white p-4 lg:col-span-7">
+            <div class="flex items-center justify-between">
+              <div class="text-sm font-semibold">Meldungen</div>
+              <div class="flex gap-2">
+                <button id="btn-export-kpis" class="min-h-[44px] rounded-xl border bg-white px-3 text-sm font-medium">Export</button>
+                <button id="btn-refresh-dashboard" class="min-h-[44px] rounded-xl border bg-white px-3 text-sm font-medium">Aktualisieren</button>
+              </div>
+            </div>
+            <div id="dash-notifications" class="mt-3 space-y-2"></div>
+          </div>
+          <div class="rounded-2xl border bg-white p-4 lg:col-span-5">
+            <div class="text-sm font-semibold">Fahrzeugsperren</div>
+            <div id="dash-blocks" class="mt-3 space-y-2"></div>
+          </div>
+        </div>
+      </section>
+
+      <section id="view-disposition" class="view hidden space-y-4">
+        <div class="grid grid-cols-1 gap-3 lg:grid-cols-12">
+          <div class="rounded-2xl border bg-white p-4 lg:col-span-4">
+            <div class="text-sm font-semibold">Routenplanung</div>
+            <div class="mt-3 grid grid-cols-2 gap-2">
+              <label class="text-xs text-slate-600">Tag<input id="disp-day" type="date" class="mt-1 w-full min-h-[44px] rounded-xl border bg-white px-3 text-sm" /></label>
+              <label class="text-xs text-slate-600">Depot<input id="disp-depot" class="mt-1 w-full min-h-[44px] rounded-xl border bg-white px-3 text-sm" placeholder="GREVEN" value="GREVEN" /></label>
+              <label class="col-span-2 text-xs text-slate-600">Fahrzeug<select id="disp-vehicle" class="mt-1 w-full min-h-[44px] rounded-xl border bg-white px-3 text-sm"><option value="">Fahrzeug wählen</option></select></label>
+              <label class="text-xs text-slate-600">Routenstart<input id="disp-route-start" type="datetime-local" class="mt-1 w-full min-h-[44px] rounded-xl border bg-white px-3 text-sm" /></label>
+              <label class="text-xs text-slate-600">Slot (Min.)<input id="disp-slot-minutes" type="number" min="10" max="240" value="30" class="mt-1 w-full min-h-[44px] rounded-xl border bg-white px-3 text-sm" /></label>
+            </div>
+            <div class="mt-3 flex gap-2">
+              <button id="btn-refresh-disposition" class="min-h-[44px] flex-1 rounded-xl border bg-white px-3 text-sm font-medium">Aktualisieren</button>
+              <button id="btn-plan-route" class="min-h-[44px] flex-1 rounded-xl bg-slate-900 px-3 text-sm font-medium text-white">Route planen</button>
+            </div>
+            <div class="mt-4 border-t pt-4">
+              <div class="flex items-center justify-between">
+                <div class="text-sm font-semibold">Selektierte Aufträge</div>
+                <button id="btn-clear-route-selection" class="min-h-[44px] rounded-xl border bg-white px-3 text-sm font-medium">Leeren</button>
+              </div>
+              <div id="disp-selected-orders" class="mt-3 space-y-2"></div>
+            </div>
+          </div>
+
+          <div class="rounded-2xl border bg-white p-4 lg:col-span-8">
+            <div class="flex items-center justify-between">
+              <div class="text-sm font-semibold">Leitstand / Integrationen</div>
+              <div id="disp-meta" class="text-xs text-slate-500">—</div>
+            </div>
+            <div id="disp-kpis" class="mt-3 grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4"></div>
+            <div class="mt-4 grid grid-cols-1 gap-3 xl:grid-cols-2">
+              <div>
+                <div class="mb-2 text-sm font-semibold">Aktive Routen</div>
+                <div id="disp-route-list" class="space-y-2"></div>
+              </div>
+              <div>
+                <div class="mb-2 text-sm font-semibold">Couplink / ETA-Watch</div>
+                <div id="disp-eta-list" class="space-y-2"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="grid grid-cols-1 gap-3 lg:grid-cols-12">
+          <div class="rounded-2xl border bg-white p-4 lg:col-span-7">
+            <div class="flex items-center justify-between">
+              <div class="text-sm font-semibold">Offene Dispositionsaufträge</div>
+              <div id="disp-orders-meta" class="text-xs text-slate-500">—</div>
+            </div>
+            <div id="disp-order-list" class="mt-3 space-y-2"></div>
+          </div>
+          <div class="rounded-2xl border bg-white p-4 lg:col-span-5">
+            <div class="text-sm font-semibold">Fahrzeuge / Kapazitäten</div>
+            <div id="disp-vehicle-list" class="mt-3 space-y-2"></div>
+          </div>
+        </div>
+      </section>
+
+      <section id="view-customers" class="view hidden space-y-4">
+        <div class="grid grid-cols-1 gap-3 lg:grid-cols-12">
+          <div class="rounded-2xl border bg-white p-4 lg:col-span-4">
+            <div class="text-sm font-semibold">Kunde anlegen</div>
+            <div class="mt-3 grid grid-cols-2 gap-2">
+              <label class="col-span-2 text-xs text-slate-600">Kundennummer<input id="cust-no" class="mt-1 w-full min-h-[44px] rounded-xl border bg-white px-3 text-sm" placeholder="CUST-1001" /></label>
+              <label class="col-span-2 text-xs text-slate-600">Name<input id="cust-name" class="mt-1 w-full min-h-[44px] rounded-xl border bg-white px-3 text-sm" placeholder="Muster GmbH" /></label>
+              <label class="text-xs text-slate-600">E-Mail<input id="cust-email" class="mt-1 w-full min-h-[44px] rounded-xl border bg-white px-3 text-sm" placeholder="mail@example.invalid" /></label>
+              <label class="text-xs text-slate-600">Telefon<input id="cust-phone" class="mt-1 w-full min-h-[44px] rounded-xl border bg-white px-3 text-sm" placeholder="+49..." /></label>
+              <label class="text-xs text-slate-600">Rechtsform<input id="cust-legal-form" class="mt-1 w-full min-h-[44px] rounded-xl border bg-white px-3 text-sm" placeholder="GmbH" /></label>
+              <label class="text-xs text-slate-600">USt-ID<input id="cust-vat-id" class="mt-1 w-full min-h-[44px] rounded-xl border bg-white px-3 text-sm" placeholder="DE..." /></label>
+            </div>
+            <div class="mt-3 flex gap-2">
+              <button id="btn-create-customer" class="min-h-[44px] flex-1 rounded-xl bg-slate-900 px-3 text-sm font-medium text-white">Anlegen</button>
+              <button id="btn-refresh-customers" class="min-h-[44px] flex-1 rounded-xl border bg-white px-3 text-sm font-medium">Aktualisieren</button>
+            </div>
+          </div>
+          <div class="rounded-2xl border bg-white p-4 lg:col-span-8">
+            <div class="flex items-center justify-between gap-2">
+              <div class="text-sm font-semibold">Kundenstamm</div>
+              <input id="customers-query" class="min-h-[44px] w-full max-w-xs rounded-xl border bg-white px-3 text-sm" placeholder="Suche nach Name oder Kundennummer" />
+            </div>
+            <div id="customers-list" class="mt-3 space-y-2"></div>
+          </div>
+        </div>
+      </section>
+
+      <section id="view-contracts" class="view hidden space-y-4">
+        <div class="grid grid-cols-1 gap-3 lg:grid-cols-12">
+          <div class="rounded-2xl border bg-white p-4 lg:col-span-4">
+            <div class="text-sm font-semibold">Vertrag anlegen</div>
+            <div class="mt-3 grid grid-cols-2 gap-2">
+              <label class="col-span-2 text-xs text-slate-600">Kunde (ID oder Kundennummer)<input id="contract-customer-id" class="mt-1 w-full min-h-[44px] rounded-xl border bg-white px-3 text-sm" placeholder="cus_... oder CUST-1001" /></label>
+              <label class="col-span-2 text-xs text-slate-600">Vertragsnummer<input id="contract-no" class="mt-1 w-full min-h-[44px] rounded-xl border bg-white px-3 text-sm" placeholder="CON-1001" /></label>
+              <label class="text-xs text-slate-600">Status<select id="contract-status" class="mt-1 w-full min-h-[44px] rounded-xl border bg-white px-3 text-sm"><option value="draft">draft</option><option value="active">active</option><option value="terminated">terminated</option></select></label>
+              <label class="text-xs text-slate-600">Titel<input id="contract-title" class="mt-1 w-full min-h-[44px] rounded-xl border bg-white px-3 text-sm" placeholder="Entsorgungsvertrag" /></label>
+              <label class="text-xs text-slate-600">Gültig von<input id="contract-valid-from" type="date" class="mt-1 w-full min-h-[44px] rounded-xl border bg-white px-3 text-sm" /></label>
+              <label class="text-xs text-slate-600">Gültig bis<input id="contract-valid-to" type="date" class="mt-1 w-full min-h-[44px] rounded-xl border bg-white px-3 text-sm" /></label>
+            </div>
+            <div class="mt-3 flex gap-2">
+              <button id="btn-create-contract" class="min-h-[44px] flex-1 rounded-xl bg-slate-900 px-3 text-sm font-medium text-white">Anlegen</button>
+              <button id="btn-refresh-contracts" class="min-h-[44px] flex-1 rounded-xl border bg-white px-3 text-sm font-medium">Aktualisieren</button>
+            </div>
+          </div>
+          <div class="rounded-2xl border bg-white p-4 lg:col-span-8">
+            <div class="flex items-center justify-between gap-2">
+              <div class="text-sm font-semibold">Verträge</div>
+              <select id="contracts-filter-status" class="min-h-[44px] rounded-xl border bg-white px-3 text-sm"><option value="">Alle</option><option value="draft">draft</option><option value="active">active</option><option value="terminated">terminated</option></select>
+            </div>
+            <div id="contracts-list" class="mt-3 space-y-2"></div>
+          </div>
+        </div>
+      </section>
+
+      <section id="view-pricing" class="view hidden space-y-4">
+        <div class="grid grid-cols-1 gap-3 lg:grid-cols-12">
+          <div class="rounded-2xl border bg-white p-4 lg:col-span-4">
+            <div class="text-sm font-semibold">Preisberechnung</div>
+            <div class="mt-3 grid grid-cols-2 gap-2">
+              <label class="col-span-2 text-xs text-slate-600">Auftrag ID<input id="pricing-order-id" class="mt-1 w-full min-h-[44px] rounded-xl border bg-white px-3 text-sm" placeholder="ord_..." /></label>
+              <label class="col-span-2 text-xs text-slate-600">Preisliste (optional)<input id="pricing-price-list-id" class="mt-1 w-full min-h-[44px] rounded-xl border bg-white px-3 text-sm" placeholder="pl_..." /></label>
+              <label class="text-xs text-slate-600">Stichtag<input id="pricing-at" type="date" class="mt-1 w-full min-h-[44px] rounded-xl border bg-white px-3 text-sm" /></label>
+              <label class="flex items-center gap-2 pt-6 text-xs text-slate-600"><input id="pricing-force" type="checkbox" /> Neuberechnung erzwingen</label>
+            </div>
+            <div class="mt-3 flex gap-2">
+              <button id="btn-calculate-pricing" class="min-h-[44px] flex-1 rounded-xl bg-slate-900 px-3 text-sm font-medium text-white">Berechnen</button>
+              <button id="btn-refresh-pricing" class="min-h-[44px] flex-1 rounded-xl border bg-white px-3 text-sm font-medium">Aktualisieren</button>
+            </div>
+            <div class="mt-4 border-t pt-4">
+              <div class="text-sm font-semibold">Stammdaten anlegen</div>
+              <div class="mt-3 grid grid-cols-2 gap-2">
+                <label class="text-xs text-slate-600">Materialcode<input id="pricing-material-code" class="mt-1 w-full min-h-[44px] rounded-xl border bg-white px-3 text-sm" placeholder="MAT-001" /></label>
+                <label class="text-xs text-slate-600">Materialname<input id="pricing-material-name" class="mt-1 w-full min-h-[44px] rounded-xl border bg-white px-3 text-sm" placeholder="Gemischte Abfaelle" /></label>
+                <label class="text-xs text-slate-600">Preisliste Code<input id="pricing-pl-code" class="mt-1 w-full min-h-[44px] rounded-xl border bg-white px-3 text-sm" placeholder="PL-2026" /></label>
+                <label class="text-xs text-slate-600">Preisliste Name<input id="pricing-pl-name" class="mt-1 w-full min-h-[44px] rounded-xl border bg-white px-3 text-sm" placeholder="Standardpreise" /></label>
+                <label class="text-xs text-slate-600">Gueltig ab<input id="pricing-pl-valid-from" type="date" class="mt-1 w-full min-h-[44px] rounded-xl border bg-white px-3 text-sm" /></label>
+                <label class="text-xs text-slate-600">Gebuehrencode<input id="pricing-fee-code" class="mt-1 w-full min-h-[44px] rounded-xl border bg-white px-3 text-sm" placeholder="CO2" /></label>
+              </div>
+              <div class="mt-3 grid grid-cols-1 gap-2">
+                <button id="btn-create-material" class="min-h-[44px] rounded-xl border bg-white px-3 text-sm font-medium">Material anlegen</button>
+                <button id="btn-create-pricelist" class="min-h-[44px] rounded-xl border bg-white px-3 text-sm font-medium">Preisliste anlegen</button>
+                <button id="btn-create-fee" class="min-h-[44px] rounded-xl border bg-white px-3 text-sm font-medium">Gebühr anlegen</button>
+              </div>
+            </div>
+          </div>
+          <div class="rounded-2xl border bg-white p-4 lg:col-span-8">
+            <div class="text-sm font-semibold">Pricing / Audit</div>
+            <div id="pricing-kpis" class="mt-3 grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4"></div>
+            <div class="mt-4 grid grid-cols-1 gap-3 xl:grid-cols-2">
+              <div>
+                <div class="mb-2 text-sm font-semibold">Preislisten</div>
+                <div id="pricing-pricelist-list" class="space-y-2"></div>
+              </div>
+              <div>
+                <div class="mb-2 text-sm font-semibold">Gebühren</div>
+                <div id="pricing-fee-list" class="space-y-2"></div>
+              </div>
+            </div>
+            <div class="mt-4 grid grid-cols-1 gap-3 xl:grid-cols-2">
+              <div>
+                <div class="mb-2 text-sm font-semibold">Materialien</div>
+                <div id="pricing-material-list" class="space-y-2"></div>
+              </div>
+              <div>
+                <div class="mb-2 text-sm font-semibold">Berechnungshistorie</div>
+                <div id="pricing-history" class="space-y-2"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="view-pool" class="view hidden space-y-4">
+        <div class="grid grid-cols-1 gap-3 lg:grid-cols-12">
+          <div class="rounded-2xl border bg-white p-4 lg:col-span-5">
+            <div class="flex items-center justify-between gap-2">
+              <div class="text-sm font-semibold">Neuer Auftrag</div>
+              <button id="btn-new-case" class="min-h-[44px] rounded-xl bg-slate-900 px-3 text-sm font-medium text-white">Erfassen</button>
+            </div>
+            <div class="mt-3 grid grid-cols-2 gap-2">
+              <label class="text-xs text-slate-600">Priorität<select id="pool-filter-priority" class="mt-1 w-full min-h-[44px] rounded-xl border bg-white px-3 text-sm"><option value="">Alle</option><option value="high">Hoch</option><option value="medium">Mittel</option><option value="low">Niedrig</option></select></label>
+              <label class="text-xs text-slate-600">Zuweisung<select id="pool-filter-assigned" class="mt-1 w-full min-h-[44px] rounded-xl border bg-white px-3 text-sm"><option value="">Alle</option><option value="assigned">Zugewiesen</option><option value="unassigned">Offen</option></select></label>
+              <label class="text-xs text-slate-600">Mitarbeiter<select id="pool-filter-assignee" class="mt-1 w-full min-h-[44px] rounded-xl border bg-white px-3 text-sm"><option value="">Alle</option></select></label>
+              <label class="text-xs text-slate-600">Status<select id="pool-filter-workstate" class="mt-1 w-full min-h-[44px] rounded-xl border bg-white px-3 text-sm"><option value="">Alle</option><option value="created">Angelegt</option><option value="assigned">Zugeordnet</option><option value="in_progress">In Arbeit</option><option value="waiting_parts">Teile fehlen</option></select></label>
+            </div>
+            <div class="mt-3 flex gap-2">
+              <button id="btn-refresh-pool" class="min-h-[44px] flex-1 rounded-xl border bg-white px-3 text-sm font-medium">Aktualisieren</button>
+              <button id="btn-open-assignees" class="min-h-[44px] flex-1 rounded-xl border bg-white px-3 text-sm font-medium">Mitarbeiter</button>
+            </div>
+          </div>
+
+          <div class="rounded-2xl border bg-white p-4 lg:col-span-7">
+            <div class="flex items-center justify-between gap-2">
+              <div class="text-sm font-semibold">Auftragspool</div>
+              <div id="pool-meta" class="text-xs text-slate-500">—</div>
+            </div>
+            <div id="pool-list" class="mt-3 space-y-2"></div>
+          </div>
+        </div>
+      </section>
+
+      <section id="view-slotplan" class="view hidden space-y-4">
+        <div class="rounded-2xl border bg-white p-4">
+          <div class="flex flex-col gap-2 md:flex-row md:items-end md:justify-between">
+            <div class="grid grid-cols-2 gap-2 md:grid-cols-4">
+              <label class="text-xs text-slate-600">Assignee<input id="slot-assignee" class="mt-1 w-full min-h-[44px] rounded-xl border bg-white px-3 text-sm" placeholder="z.B. Max" /></label>
+              <label class="text-xs text-slate-600">Start<input id="slot-start" type="date" class="mt-1 w-full min-h-[44px] rounded-xl border bg-white px-3 text-sm" /></label>
+              <label class="text-xs text-slate-600">Ende<input id="slot-end" type="date" class="mt-1 w-full min-h-[44px] rounded-xl border bg-white px-3 text-sm" /></label>
+              <label class="text-xs text-slate-600">Slots/Tag<input id="slot-count" type="number" min="1" max="12" value="6" class="mt-1 w-full min-h-[44px] rounded-xl border bg-white px-3 text-sm" /></label>
+            </div>
+            <div class="flex gap-2">
+              <button id="btn-refresh-slots" class="min-h-[44px] rounded-xl border bg-white px-3 text-sm font-medium">Laden</button>
+            </div>
+          </div>
+          <div id="slot-grid" class="mt-4 overflow-auto"></div>
+        </div>
+      </section>
+
+      <section id="view-lager" class="view hidden space-y-4">
+        <div class="grid grid-cols-1 gap-3 lg:grid-cols-12">
+          <div class="rounded-2xl border bg-white p-4 lg:col-span-5">
+            <div class="text-sm font-semibold">Bewegung erfassen</div>
+            <div class="mt-3 grid grid-cols-2 gap-2">
+              <label class="text-xs text-slate-600">Typ<select id="mv-type" class="mt-1 w-full min-h-[44px] rounded-xl border bg-white px-3 text-sm"><option value="issue">Ausgabe</option><option value="pickup">Entnahme</option><option value="transfer">Umlagerung</option><option value="inbound">Wareneingang</option><option value="putaway">Einlagerung</option><option value="adjust">Korrektur</option></select></label>
+              <label class="text-xs text-slate-600">Menge<input id="mv-qty" type="number" class="mt-1 w-full min-h-[44px] rounded-xl border bg-white px-3 text-sm" placeholder="z.B. 1" /></label>
+              <label class="text-xs text-slate-600">Artikel (partNo)<input id="mv-partNo" class="mt-1 w-full min-h-[44px] rounded-xl border bg-white px-3 text-sm" placeholder="z.B. FILT-01" /></label>
+              <label class="text-xs text-slate-600">Unit (optional)<input id="mv-unitId" class="mt-1 w-full min-h-[44px] rounded-xl border bg-white px-3 text-sm" placeholder="veh_01" /></label>
+              <label class="text-xs text-slate-600">Von (Code)<input id="mv-from" class="mt-1 w-full min-h-[44px] rounded-xl border bg-white px-3 text-sm" placeholder="A-01" /></label>
+              <label class="text-xs text-slate-600">Nach (Code)<input id="mv-to" class="mt-1 w-full min-h-[44px] rounded-xl border bg-white px-3 text-sm" placeholder="B-02" /></label>
+              <label class="text-xs text-slate-600">Charge<input id="mv-batch" class="mt-1 w-full min-h-[44px] rounded-xl border bg-white px-3 text-sm" placeholder="CH-123" /></label>
+              <label class="text-xs text-slate-600">Serien (CSV)<input id="mv-serials" class="mt-1 w-full min-h-[44px] rounded-xl border bg-white px-3 text-sm" placeholder="SN1,SN2" /></label>
+              <label class="col-span-2 text-xs text-slate-600">Case (optional)<input id="mv-caseId" class="mt-1 w-full min-h-[44px] rounded-xl border bg-white px-3 text-sm" placeholder="wsc_..." /></label>
+              <label class="col-span-2 text-xs text-slate-600">Grund<input id="mv-reason" class="mt-1 w-full min-h-[44px] rounded-xl border bg-white px-3 text-sm" placeholder="z.B. Reparatur" /></label>
+            </div>
+            <div class="mt-3 flex gap-2">
+              <button id="btn-create-move" class="min-h-[44px] flex-1 rounded-xl bg-slate-900 px-3 text-sm font-medium text-white">Buchen</button>
+              <button id="btn-refresh-movements" class="min-h-[44px] flex-1 rounded-xl border bg-white px-3 text-sm font-medium">Bewegungen</button>
+            </div>
+          </div>
+          <div class="rounded-2xl border bg-white p-4 lg:col-span-7">
+            <div class="flex items-center justify-between">
+              <div class="text-sm font-semibold">Bestand / Low Stock</div>
+              <label class="text-xs text-slate-600"><input id="stock-low-only" type="checkbox" class="mr-2" />nur niedrig</label>
+            </div>
+            <div id="stock-list" class="mt-3 space-y-2"></div>
+            <div class="mt-4 border-t pt-4">
+              <div class="flex items-center justify-between">
+                <div class="text-sm font-semibold">Bewegungen (Filter)</div>
+                <button id="btn-open-movement-filter" class="min-h-[44px] rounded-xl border bg-white px-3 text-sm font-medium">Filter</button>
+              </div>
+              <div id="movement-list" class="mt-3 space-y-2"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="view-pruefungen" class="view hidden space-y-4">
+        <div class="grid grid-cols-1 gap-3 lg:grid-cols-12">
+          <div class="rounded-2xl border bg-white p-4 lg:col-span-5">
+            <div class="text-sm font-semibold">Prüfung planen</div>
+            <div class="mt-3 grid grid-cols-2 gap-2">
+              <label class="col-span-2 text-xs text-slate-600">Unit ID<input id="insp-unit" class="mt-1 w-full min-h-[44px] rounded-xl border bg-white px-3 text-sm" placeholder="veh_01" /></label>
+              <label class="col-span-2 text-xs text-slate-600">Typ<input id="insp-type" class="mt-1 w-full min-h-[44px] rounded-xl border bg-white px-3 text-sm" placeholder="HU/AU" /></label>
+              <label class="col-span-2 text-xs text-slate-600">Fälligkeitsmonat (YYYY-MM)<input id="insp-month" class="mt-1 w-full min-h-[44px] rounded-xl border bg-white px-3 text-sm" placeholder="2026-06" /></label>
+            </div>
+            <div class="mt-3 flex gap-2">
+              <button id="btn-schedule-insp" class="min-h-[44px] flex-1 rounded-xl bg-slate-900 px-3 text-sm font-medium text-white">Planen</button>
+              <button id="btn-refresh-insp" class="min-h-[44px] flex-1 rounded-xl border bg-white px-3 text-sm font-medium">Liste</button>
+            </div>
+            <div class="mt-4 border-t pt-4">
+              <div class="text-sm font-semibold">Kalender</div>
+              <a id="insp-ics" class="mt-2 inline-block min-h-[44px] rounded-xl border bg-white px-3 py-2 text-sm font-medium" href="/api/workshop/inspections/ics?startMonth=2026-01&endMonth=2026-12">ICS Export</a>
+            </div>
+          </div>
+          <div class="rounded-2xl border bg-white p-4 lg:col-span-7">
+            <div class="flex items-center justify-between">
+              <div class="text-sm font-semibold">Prüfungen</div>
+              <select id="insp-filter-status" class="min-h-[44px] rounded-xl border bg-white px-3 text-sm"><option value="">Alle</option><option value="scheduled">Geplant</option><option value="completed">Abgeschlossen</option></select>
+            </div>
+            <div id="insp-list" class="mt-3 space-y-2"></div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <script>
+      const state = {
+        view: "dashboard",
+        auth: loadAuth(),
+        stream: null,
+        streamReconnectMs: 1000,
+        debounceTimer: null,
+        poolById: new Map(),
+        customerById: new Map(),
+        contractById: new Map(),
+        routeById: new Map(),
+        orderById: new Map(),
+        vehicleById: new Map(),
+        priceListById: new Map(),
+        pricingCalcById: new Map(),
+        movementFilters: { serial: "", batchNo: "", partNo: "" },
+        selectedRouteOrderIds: new Set(),
+      };
+
+      function esc(s) {
+        return String(s)
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#39;");
+      }
+
+      function loadAuth() {
+        try {
+          const raw = localStorage.getItem("ahlert_auth");
+          const obj = raw ? JSON.parse(raw) : null;
+          if (!obj || typeof obj !== "object") return { user: "", permissions: "" };
+          return { user: String(obj.user || ""), permissions: String(obj.permissions || "") };
+        } catch {
+          return { user: "", permissions: "" };
+        }
+      }
+
+      function saveAuth(user, permissions) {
+        state.auth = { user: String(user || ""), permissions: String(permissions || "") };
+        localStorage.setItem("ahlert_auth", JSON.stringify(state.auth));
+        connectStream();
+      }
+
+      function apiHeaders() {
+        const h = {};
+        if (state.auth.user) h["x-user"] = state.auth.user;
+        if (state.auth.permissions) h["x-permissions"] = state.auth.permissions;
+        return h;
+      }
+
+      async function api(path, { method = "GET", body = null, headers = {} } = {}) {
+        const h = { ...apiHeaders(), ...headers };
+        const init = { method, headers: h };
+        if (body !== null && body !== undefined) {
+          init.headers["content-type"] = "application/json";
+          init.body = JSON.stringify(body);
+        }
+        const res = await fetch(path, init);
+        const txt = await res.text();
+        let json = null;
+        try {
+          json = txt ? JSON.parse(txt) : null;
+        } catch {}
+        if (!res.ok) {
+          const msg = json && json.message ? json.message : res.statusText;
+          throw new Error(`${res.status} ${msg}`);
+        }
+        return json;
+      }
+
+      async function apiText(path, { method = "GET", body = null, headers = {} } = {}) {
+        const h = { ...apiHeaders(), ...headers };
+        const init = { method, headers: h };
+        if (body !== null && body !== undefined) {
+          init.headers["content-type"] = "application/json";
+          init.body = JSON.stringify(body);
+        }
+        const res = await fetch(path, init);
+        const txt = await res.text();
+        if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+        return txt;
+      }
+
+      function openModal(title, html) {
+        document.getElementById("modal-title").textContent = title;
+        const body = document.getElementById("modal-body");
+        body.innerHTML = html;
+        document.getElementById("modal").classList.remove("hidden");
+      }
+
+      function closeModal() {
+        document.getElementById("modal").classList.add("hidden");
+        document.getElementById("modal-body").innerHTML = "";
+      }
+
+      document.getElementById("modal-close").addEventListener("click", () => closeModal());
+      document.getElementById("modal-backdrop").addEventListener("click", () => closeModal());
+
+      function setView(v) {
+        state.view = v;
+        for (const el of document.querySelectorAll(".view")) el.classList.add("hidden");
+        const active = document.getElementById(`view-${v}`);
+        if (active) active.classList.remove("hidden");
+        for (const b of document.querySelectorAll(".nav-btn")) {
+          const on = b.getAttribute("data-view") === v;
+          b.className = `nav-btn min-h-[44px] whitespace-nowrap rounded-xl border px-3 text-sm font-medium ${on ? "bg-slate-900 text-white border-slate-900" : "bg-white hover:bg-slate-50"}`;
+        }
+        refreshView().catch(() => {});
+        if (state.viewTimer) clearInterval(state.viewTimer);
+        state.viewTimer = null;
+        if (v === "disposition") {
+          state.viewTimer = setInterval(() => {
+            if (state.view === "disposition") loadDisposition().catch(() => {});
+          }, 5 * 60 * 1000);
+        }
+      }
+
+      for (const b of document.querySelectorAll(".nav-btn")) {
+        b.addEventListener("click", () => setView(b.getAttribute("data-view")));
+      }
+
+      function scheduleRefresh() {
+        if (state.debounceTimer) clearTimeout(state.debounceTimer);
+        state.debounceTimer = setTimeout(() => refreshView().catch(() => {}), 200);
+      }
+
+      function connectStream() {
+        try {
+          if (state.stream) state.stream.close();
+        } catch {}
+        state.stream = null;
+
+        const p = new URLSearchParams();
+        p.set("topics", "dashboard,workshop,planning,inventory,inspections");
+        if (state.auth.user) p.set("user", state.auth.user);
+        if (state.auth.permissions) p.set("permissions", state.auth.permissions);
+        const url = `/api/stream?${p.toString()}`;
+
+        try {
+          state.stream = new EventSource(url);
+        } catch {
+          setTimeout(connectStream, state.streamReconnectMs);
+          state.streamReconnectMs = Math.min(30000, state.streamReconnectMs * 2);
+          return;
+        }
+
+        state.stream.addEventListener("dashboard_changed", () => scheduleRefresh());
+        state.stream.addEventListener("workshop_case_created", () => scheduleRefresh());
+        state.stream.addEventListener("workshop_case_closed", () => scheduleRefresh());
+        state.stream.addEventListener("workshop_case_state_changed", () => scheduleRefresh());
+        state.stream.addEventListener("workshop_case_assigned", () => scheduleRefresh());
+        state.stream.addEventListener("workshop_case_message_created", () => scheduleRefresh());
+        state.stream.addEventListener("workshop_case_approval_requested", () => scheduleRefresh());
+        state.stream.addEventListener("workshop_case_approval_decided", () => scheduleRefresh());
+        state.stream.addEventListener("workshop_case_signed", () => scheduleRefresh());
+        state.stream.addEventListener("workshop_slot_set", () => scheduleRefresh());
+        state.stream.addEventListener("inventory_movement_created", () => scheduleRefresh());
+        state.stream.addEventListener("inspection_scheduled", () => scheduleRefresh());
+        state.stream.addEventListener("inspection_completed", () => scheduleRefresh());
+
+        state.stream.onopen = () => {
+          state.streamReconnectMs = 1000;
+        };
+        state.stream.onerror = () => {
+          try {
+            state.stream.close();
+          } catch {}
+          setTimeout(connectStream, state.streamReconnectMs);
+          state.streamReconnectMs = Math.min(30000, state.streamReconnectMs * 2);
+        };
+      }
+
+      async function refreshView() {
+        if (state.view === "dashboard") return loadDashboard();
+        if (state.view === "disposition") return loadDisposition();
+        if (state.view === "customers") return loadCustomers();
+        if (state.view === "contracts") return loadContracts();
+        if (state.view === "pricing") return loadPricing();
+        if (state.view === "pool") return loadPool();
+        if (state.view === "slotplan") return loadSlots();
+        if (state.view === "lager") return loadInventory();
+        if (state.view === "pruefungen") return loadInspections();
+      }
+
+      function severityClass(sev) {
+        return sev === "critical"
+          ? "border-red-200 bg-red-50 text-red-900"
+          : sev === "warning"
+          ? "border-amber-200 bg-amber-50 text-amber-900"
+          : "border-slate-200 bg-white text-slate-900";
+      }
+
+      function infoCardClass(extra = "") {
+        return `w-full rounded-2xl border bg-white p-4 text-left transition hover:bg-slate-50 ${extra}`.trim();
+      }
+
+      function fmtDateTime(value) {
+        if (!value) return "—";
+        const d = new Date(value);
+        if (Number.isNaN(d.valueOf())) return String(value);
+        return d.toLocaleString("de-DE", {
+          year: "numeric",
+          month: "2-digit",
+          day: "2-digit",
+          hour: "2-digit",
+          minute: "2-digit",
+        });
+      }
+
+      function fmtDate(value) {
+        if (!value) return "—";
+        const d = new Date(`${String(value).slice(0, 10)}T00:00:00`);
+        if (Number.isNaN(d.valueOf())) return String(value);
+        return d.toLocaleDateString("de-DE");
+      }
+
+      function money(cents, currency = "EUR") {
+        const n = Number(cents || 0) / 100;
+        return new Intl.NumberFormat("de-DE", { style: "currency", currency }).format(n);
+      }
+
+      function badge(label, cls = "bg-slate-100 text-slate-700") {
+        return `<span class="rounded-lg px-2 py-1 text-xs font-medium ${cls}">${esc(label)}</span>`;
+      }
+
+      function yesNoBadge(flag) {
+        return flag ? badge("ja", "bg-emerald-100 text-emerald-800") : badge("nein", "bg-slate-100 text-slate-700");
+      }
+
+      function setInputValue(id, value) {
+        const el = document.getElementById(id);
+        if (el) el.value = value || "";
+      }
+
+      function routeOrderSelected(orderId) {
+        return state.selectedRouteOrderIds.has(orderId);
+      }
+
+      async function loadDashboard() {
+        const overview = await fetch("/api/dashboard/overview").then((r) => r.json());
+        const ws = overview.kpis && overview.kpis.workshop ? overview.kpis.workshop : { vehiclesBlocked: 0, criticalDefectsOpen: 0 };
+        document.getElementById("dash-kpi-workshop").textContent = `${ws.vehiclesBlocked} block · ${ws.criticalDefectsOpen} kritisch`;
+        document.getElementById("dash-kpi-workshop-sub").textContent = "Fahrzeugsperren aus Werkstatt/Prüfungen";
+
+        const notifs = overview.notifications || [];
+        const notifWrap = document.getElementById("dash-notifications");
+        notifWrap.innerHTML = "";
+        for (const n of notifs.slice(0, 15)) {
+          const link = n.deepLink && n.deepLink.href ? `<a class="mt-2 inline-block text-xs font-medium underline opacity-90" href="${esc(n.deepLink.href)}">${esc(n.deepLink.label || "Öffnen")}</a>` : "";
+          const el = document.createElement("div");
+          el.className = `rounded-xl border p-3 ${severityClass(n.severity)}`;
+          el.innerHTML = `<div class="text-sm font-semibold">${esc(n.title)}</div><div class="mt-1 text-xs opacity-90">${esc(n.message)}</div>${link}`;
+          notifWrap.appendChild(el);
+        }
+        if (!notifs.length) {
+          const el = document.createElement("div");
+          el.className = "rounded-xl border bg-white p-3 text-xs text-slate-600";
+          el.textContent = "Keine Meldungen.";
+          notifWrap.appendChild(el);
+        }
+
+        const blocks = (overview.readiness && overview.readiness.blockedVehicles) || [];
+        const blocksWrap = document.getElementById("dash-blocks");
+        blocksWrap.innerHTML = "";
+        for (const b of blocks.slice(0, 15)) {
+          const el = document.createElement("a");
+          el.href = b.deepLink || "#";
+          el.className = `block rounded-xl border p-3 ${severityClass(b.severity)}`;
+          el.innerHTML = `<div class="text-xs font-medium opacity-80">${esc(b.vehicleCode)} · ${esc(b.sourceModule)}</div><div class="mt-1 text-sm font-semibold">${esc(b.reason)}</div>`;
+          blocksWrap.appendChild(el);
+        }
+        if (!blocks.length) {
+          const el = document.createElement("div");
+          el.className = "rounded-xl border bg-white p-3 text-xs text-slate-600";
+          el.textContent = "Keine aktiven Sperren.";
+          blocksWrap.appendChild(el);
+        }
+
+        document.getElementById("dash-kpi-sla").textContent = "—";
+        document.getElementById("dash-kpi-sla-sub").textContent = "Zugang erforderlich (WORKSHOP_VIEW)";
+        document.getElementById("dash-kpi-insp").textContent = "—";
+        document.getElementById("dash-kpi-insp-sub").textContent = "Zugang erforderlich (WORKSHOP_VIEW)";
+
+        if (state.auth.user) {
+          try {
+            const kpi = await api("/api/workshop/reports/kpis");
+            const high = kpi.sla.closed.high;
+            const med = kpi.sla.closed.medium;
+            const low = kpi.sla.closed.low;
+            const met = high.met + med.met + low.met;
+            const total = high.total + med.total + low.total;
+            document.getElementById("dash-kpi-sla").textContent = total ? `${Math.round((met / total) * 100)}%` : "—";
+            document.getElementById("dash-kpi-sla-sub").textContent = `${met}/${total} im SLA (hoch/mittel/niedrig)`;
+
+            const insp = kpi.inspections;
+            document.getElementById("dash-kpi-insp").textContent = insp.dueTotal ? `${Math.round((insp.compliant / insp.dueTotal) * 100)}%` : "—";
+            document.getElementById("dash-kpi-insp-sub").textContent = `${insp.compliant}/${insp.dueTotal} fristgerecht · offen überfällig ${insp.overdueOpen}`;
+          } catch (e) {
+            document.getElementById("dash-kpi-sla").textContent = "—";
+            document.getElementById("dash-kpi-sla-sub").textContent = String(e && e.message ? e.message : e);
+            document.getElementById("dash-kpi-insp").textContent = "—";
+            document.getElementById("dash-kpi-insp-sub").textContent = String(e && e.message ? e.message : e);
+          }
+        }
+      }
+
+      document.getElementById("btn-refresh-dashboard").addEventListener("click", () => loadDashboard().catch(() => {}));
+      document.getElementById("btn-export-kpis").addEventListener("click", async () => {
+        if (!state.auth.user) return;
+        const csv = await apiText("/api/workshop/reports/kpis?format=csv");
+        const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `workshop_kpis_${new Date().toISOString().slice(0, 10)}.csv`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+      });
+
+      function renderSelectedRouteOrders() {
+        const wrap = document.getElementById("disp-selected-orders");
+        if (!wrap) return;
+        const ids = Array.from(state.selectedRouteOrderIds);
+        wrap.innerHTML = "";
+        if (!ids.length) {
+          wrap.innerHTML = `<div class="rounded-xl border bg-white p-3 text-sm text-slate-600">Noch keine Aufträge selektiert.</div>`;
+          return;
+        }
+        for (const id of ids) {
+          const order = state.orderById.get(id) || { id, status: "—", site: {} };
+          const row = document.createElement("div");
+          row.className = "rounded-xl border bg-white p-3";
+          row.innerHTML = `
+            <div class="flex items-center justify-between gap-2">
+              <div class="min-w-0">
+                <div class="text-xs text-slate-500">${esc(order.status)} · ${esc(order.site?.depot || order.site?.address || "—")}</div>
+                <div class="mt-1 truncate text-sm font-semibold">${esc(order.id)}</div>
+              </div>
+              <button data-order-remove="${esc(id)}" class="min-h-[44px] rounded-xl border bg-white px-3 text-sm font-medium">Entfernen</button>
+            </div>
+          `;
+          wrap.appendChild(row);
+        }
+        for (const b of document.querySelectorAll("[data-order-remove]")) {
+          b.addEventListener("click", () => {
+            state.selectedRouteOrderIds.delete(b.getAttribute("data-order-remove"));
+            renderSelectedRouteOrders();
+          });
+        }
+      }
+
+      async function openDispositionKpi(kind, payload) {
+        if (kind === "routes") {
+          const routes = (payload.items || [])
+            .map(
+              (r) =>
+                `<button data-open-route="${esc(r.id)}" class="${infoCardClass()}"><div class="text-xs text-slate-500">${esc(r.day)} · ${esc(r.depotCode || "—")}</div><div class="mt-1 text-sm font-semibold">${esc(r.id)}</div><div class="mt-1 text-xs text-slate-600">${esc(r.vehicleId || "—")} · ${esc(r.stopCount)} Stops</div></button>`,
+            )
+            .join("");
+          openModal("Routenübersicht", routes || `<div class="text-sm text-slate-600">Keine Routen vorhanden.</div>`);
+          for (const b of document.querySelectorAll("[data-open-route]")) b.addEventListener("click", () => openRoute(b.getAttribute("data-open-route")));
+          return;
+        }
+        openModal("Detail", `<pre class="overflow-auto rounded-xl bg-slate-50 p-3 text-xs">${esc(JSON.stringify(payload, null, 2))}</pre>`);
+      }
+
+      async function openRoute(routeId) {
+        const data = await api(`/api/waste/route?id=${encodeURIComponent(routeId)}`);
+        const matrix = await api(`/api/disposition/osrm/matrix?routeId=${encodeURIComponent(routeId)}`).catch(() => null);
+        const route = data.route || {};
+        const stops = data.stops || [];
+        const stopsHtml = stops
+          .map(
+            (s) => `
+            <div class="rounded-xl border p-3">
+              <div class="text-xs text-slate-500">Stop ${esc(s.stopIndex)} · ${esc(s.kind)}</div>
+              <div class="mt-1 text-sm font-semibold">${esc(s.orderId || s.address || "—")}</div>
+              <div class="mt-1 text-xs text-slate-600">${esc(s.address || "—")}</div>
+              <div class="mt-1 text-xs text-slate-500">${esc(fmtDateTime(s.plannedArrivalAt))} → ${esc(fmtDateTime(s.plannedDepartureAt))}</div>
+            </div>
+          `,
+          )
+          .join("");
+        const matrixInfo =
+          matrix && matrix.durations
+            ? `<div class="rounded-xl border bg-slate-50 p-3 text-xs text-slate-700">OSRM-Matrix geladen · ${esc(matrix.points?.length || 0)} Punkte</div>`
+            : `<div class="rounded-xl border bg-slate-50 p-3 text-xs text-slate-500">OSRM-Matrix nicht verfügbar oder nicht konfiguriert.</div>`;
+        openModal(
+          `Route ${routeId}`,
+          `
+          <div class="space-y-4">
+            <div class="rounded-2xl border bg-white p-3">
+              <div class="text-xs text-slate-500">${esc(route.day || "—")} · ${esc(route.depotCode || "—")} · ${esc(route.status || "—")}</div>
+              <div class="mt-1 text-sm font-semibold">${esc(route.vehicleId || "—")} · ${esc(route.driverId || "ohne Fahrer")}</div>
+              <div class="mt-1 text-xs text-slate-600">${esc(fmtDateTime(route.plannedStartAt))} → ${esc(fmtDateTime(route.plannedEndAt))}</div>
+            </div>
+            <div class="grid grid-cols-1 gap-2 sm:grid-cols-2">
+              <button id="btn-route-push" class="min-h-[44px] rounded-xl border bg-white px-3 text-sm font-medium">An Couplink senden</button>
+              <button id="btn-route-reopt" class="min-h-[44px] rounded-xl border bg-white px-3 text-sm font-medium">Neu optimieren</button>
+            </div>
+            ${matrixInfo}
+            <div>
+              <div class="mb-2 text-sm font-semibold">Stops</div>
+              <div class="space-y-2">${stopsHtml || `<div class="text-sm text-slate-600">Keine Stops vorhanden.</div>`}</div>
+            </div>
+          </div>
+          `,
+        );
+        document.getElementById("btn-route-push").addEventListener("click", async () => {
+          await api("/api/disposition/couplink/push-route", { method: "POST", body: { routeId } });
+          await loadDisposition();
+          closeModal();
+        });
+        document.getElementById("btn-route-reopt").addEventListener("click", async () => {
+          const orderIds = prompt("Neue Auftrags-IDs (CSV):", "");
+          if (!orderIds) return;
+          await api("/api/waste/routes/reoptimize", { method: "POST", body: { routeId, orderIds: orderIds.split(",").map((x) => x.trim()).filter(Boolean) } });
+          await loadDisposition();
+          closeModal();
+        });
+      }
+
+      async function openEtaModal(item) {
+        const canHere = Boolean(item && item.position && Number.isFinite(item.position.lat) && Number.isFinite(item.position.lon));
+        const canReroute = canHere && Boolean(item.routeId) && item.hereConfigured === true;
+        openModal(
+          "ETA / Neuplanung",
+          `
+          <div class="space-y-3">
+            <div class="rounded-2xl border bg-white p-3">
+              <div class="text-xs text-slate-500">${esc(item.code)} · ${esc(item.vehicleId)}</div>
+              <div class="mt-1 text-sm font-semibold">${item.delayMinutes === null ? "Keine ETA" : `${esc(item.delayMinutes)} Min. Delay`}</div>
+              <div class="mt-1 text-xs text-slate-600">Route ${esc(item.routeId || "—")} · ${item.rerouteRecommended ? "Neuplanung empfohlen" : "Im Rahmen"}</div>
+            </div>
+            <div class="grid grid-cols-1 gap-2 sm:grid-cols-2">
+              <button id="btn-eta-here" class="min-h-[44px] rounded-xl border bg-white px-3 text-sm font-medium" ${canReroute ? "" : "disabled"}>HERE Umleitungsvorschlag</button>
+              <button id="btn-eta-debug" class="min-h-[44px] rounded-xl border bg-white px-3 text-sm font-medium">Details</button>
+            </div>
+            <div id="eta-result" class="hidden rounded-xl border bg-slate-50 p-3 text-xs text-slate-700"></div>
+          </div>
+          `,
+        );
+        document.getElementById("btn-eta-debug").addEventListener("click", () => {
+          openModal("ETA Details", `<pre class="overflow-auto rounded-xl bg-slate-50 p-3 text-xs">${esc(JSON.stringify(item, null, 2))}</pre>`);
+        });
+        document.getElementById("btn-eta-here").addEventListener("click", async () => {
+          if (!canReroute) return;
+          const res = await api("/api/traffic/here/reroute-suggest", {
+            method: "POST",
+            body: { routeId: item.routeId, vehicleId: item.vehicleId, origin: item.position, alternatives: 2 },
+          });
+          const el = document.getElementById("eta-result");
+          el.classList.remove("hidden");
+          const best = res.best ? `Best: #${res.best.index} · ${Math.round(res.best.durationSeconds / 60)} min` : "Keine Route";
+          const delta = res.deltaSeconds !== null ? `Δ ${Math.round(res.deltaSeconds / 60)} min` : "Δ —";
+          el.textContent = `${best} · ${delta} · Usage ${res.usage?.totalCount || 0}/${res.usage?.limit || 250000}`;
+        });
+      }
+
+      async function loadDisposition() {
+        if (!state.auth.user) {
+          for (const id of ["disp-kpis", "disp-route-list", "disp-eta-list", "disp-order-list", "disp-vehicle-list", "disp-selected-orders"]) {
+            document.getElementById(id).innerHTML = `<div class="rounded-xl border bg-white p-3 text-sm text-slate-600">Zugang setzen (x-user / x-permissions).</div>`;
+          }
+          return;
+        }
+        const day = document.getElementById("disp-day").value || new Date().toISOString().slice(0, 10);
+        const depotCode = document.getElementById("disp-depot").value.trim() || "GREVEN";
+        const [overview, integrations] = await Promise.all([
+          api(`/api/disposition/overview?day=${encodeURIComponent(day)}&depotCode=${encodeURIComponent(depotCode)}`),
+          api(`/api/disposition/integrations/status?day=${encodeURIComponent(day)}&depotCode=${encodeURIComponent(depotCode)}`).catch((e) => ({ error: String(e.message || e) })),
+        ]);
+        state.routeById = new Map((overview.routing || []).map((r) => [r.id, r]));
+        state.orderById = new Map((overview.orders || []).map((o) => [o.id, o]));
+        state.vehicleById = new Map((overview.vehicles || []).map((v) => [v.id, v]));
+        document.getElementById("disp-meta").textContent = `${overview.kpis.routes} Routen · ${overview.kpis.pendingOrders} offene Aufträge`;
+
+        const vehicleSel = document.getElementById("disp-vehicle");
+        const keep = vehicleSel.value;
+        vehicleSel.innerHTML = `<option value="">Fahrzeug wählen</option>`;
+        for (const v of overview.vehicles || []) {
+          const opt = document.createElement("option");
+          opt.value = v.id;
+          opt.textContent = `${v.code} (${v.id})`;
+          vehicleSel.appendChild(opt);
+        }
+        vehicleSel.value = keep || vehicleSel.value;
+
+        const kpis = [
+          { key: "routes", title: "Routen", value: overview.kpis.routes, sub: `${overview.kpis.stops} Stops`, payload: { items: overview.routing || [] } },
+          { key: "pending", title: "Offene Aufträge", value: overview.kpis.pendingOrders, sub: `${(overview.orders || []).length} geladen`, payload: { items: overview.orders || [] } },
+          { key: "duplicates", title: "Doppelfahrt-Kandidaten", value: overview.kpis.duplicateCandidates, sub: "per Route/Stop geprüft", payload: { count: overview.kpis.duplicateCandidates } },
+          {
+            key: "couplink",
+            title: "Couplink",
+            value: integrations.integrations?.couplink?.status || "—",
+            sub: `${integrations.integrations?.couplink?.vehiclePositions || 0} Positionen`,
+            payload: integrations,
+          },
+          {
+            key: "here",
+            title: "HERE Traffic",
+            value: integrations.integrations?.here?.status || "—",
+            sub: `${integrations.integrations?.here?.incidentCount || 0} Incidents · ${integrations.integrations?.here?.roadworksCount || 0} Baustellen`,
+            payload: integrations.integrations?.here || integrations,
+          },
+        ];
+        const kpiWrap = document.getElementById("disp-kpis");
+        kpiWrap.innerHTML = "";
+        for (const k of kpis) {
+          const btn = document.createElement("button");
+          btn.className = infoCardClass();
+          btn.innerHTML = `<div class="text-xs font-medium text-slate-500">${esc(k.title)}</div><div class="mt-2 text-2xl font-semibold">${esc(k.value)}</div><div class="mt-1 text-xs text-slate-500">${esc(k.sub)}</div>`;
+          btn.addEventListener("click", () => openDispositionKpi(k.key, k.payload));
+          kpiWrap.appendChild(btn);
+        }
+
+        const routeWrap = document.getElementById("disp-route-list");
+        routeWrap.innerHTML = "";
+        for (const r of overview.routing || []) {
+          const btn = document.createElement("button");
+          btn.className = infoCardClass();
+          btn.innerHTML = `<div class="text-xs text-slate-500">${esc(r.day)} · ${esc(r.depotCode || "—")} · ${esc(r.status)}</div><div class="mt-1 text-sm font-semibold">${esc(r.id)}</div><div class="mt-1 text-xs text-slate-600">${esc(r.vehicleId || "—")} · ${esc(r.stopCount)} Stops</div>`;
+          btn.addEventListener("click", () => openRoute(r.id));
+          routeWrap.appendChild(btn);
+        }
+        if (!(overview.routing || []).length) routeWrap.innerHTML = `<div class="rounded-xl border bg-white p-3 text-sm text-slate-600">Keine Routen für den Filter.</div>`;
+
+        const etaWrap = document.getElementById("disp-eta-list");
+        etaWrap.innerHTML = "";
+        for (const it of integrations.etaWatch || []) {
+          const item = { ...it, hereConfigured: integrations.integrations?.here?.configured === true };
+          const btn = document.createElement("button");
+          btn.className = `${infoCardClass()} ${item.rerouteRecommended ? "border-amber-300 bg-amber-50" : ""}`;
+          btn.innerHTML = `<div class="text-xs text-slate-500">${esc(item.code)} · ${esc(item.vehicleId)}</div><div class="mt-1 text-sm font-semibold">${item.delayMinutes === null ? "Keine ETA" : `${item.delayMinutes} Min. Delay`}</div><div class="mt-1 text-xs text-slate-600">${item.rerouteRecommended ? "Neuplanung empfohlen" : "Im Rahmen"} · Route ${esc(item.routeId || "—")}</div>`;
+          btn.addEventListener("click", () => openEtaModal(item));
+          etaWrap.appendChild(btn);
+        }
+        if (!(integrations.etaWatch || []).length) etaWrap.innerHTML = `<div class="rounded-xl border bg-white p-3 text-sm text-slate-600">Keine Couplink-/ETA-Daten.</div>`;
+
+        const orderWrap = document.getElementById("disp-order-list");
+        document.getElementById("disp-orders-meta").textContent = `${(overview.orders || []).length} Einträge`;
+        orderWrap.innerHTML = "";
+        for (const o of overview.orders || []) {
+          const selected = routeOrderSelected(o.id);
+          const row = document.createElement("div");
+          row.className = `rounded-xl border p-3 ${selected ? "border-slate-900 bg-slate-50" : "bg-white"}`;
+          row.innerHTML = `
+            <div class="flex items-start justify-between gap-2">
+              <div class="min-w-0">
+                <div class="text-xs text-slate-500">${esc(o.status)} · ${esc(o.priorityUrgency || "—")} · ${esc(o.materialCode || "ohne Material")}</div>
+                <div class="mt-1 truncate text-sm font-semibold">${esc(o.id)}</div>
+                <div class="mt-1 text-xs text-slate-600">${esc(o.site?.address || o.site?.depot || "—")}</div>
+              </div>
+              <div class="flex flex-col gap-2">
+                <button data-order-toggle="${esc(o.id)}" class="min-h-[44px] rounded-xl border bg-white px-3 text-sm font-medium">${selected ? "Abwählen" : "Wählen"}</button>
+                <button data-order-pricing="${esc(o.id)}" class="min-h-[44px] rounded-xl border bg-white px-3 text-sm font-medium">Pricing</button>
+              </div>
+            </div>
+          `;
+          orderWrap.appendChild(row);
+        }
+        if (!(overview.orders || []).length) orderWrap.innerHTML = `<div class="rounded-xl border bg-white p-3 text-sm text-slate-600">Keine disponierbaren Aufträge vorhanden.</div>`;
+        for (const b of document.querySelectorAll("[data-order-toggle]")) {
+          b.addEventListener("click", () => {
+            const id = b.getAttribute("data-order-toggle");
+            if (state.selectedRouteOrderIds.has(id)) state.selectedRouteOrderIds.delete(id);
+            else state.selectedRouteOrderIds.add(id);
+            renderSelectedRouteOrders();
+            loadDisposition().catch(() => {});
+          });
+        }
+        for (const b of document.querySelectorAll("[data-order-pricing]")) {
+          b.addEventListener("click", () => {
+            setView("pricing");
+            setInputValue("pricing-order-id", b.getAttribute("data-order-pricing"));
+            loadPricing().catch(() => {});
+          });
+        }
+
+        const vehicleWrap = document.getElementById("disp-vehicle-list");
+        vehicleWrap.innerHTML = "";
+        for (const v of overview.vehicles || []) {
+          const btn = document.createElement("button");
+          btn.className = infoCardClass();
+          btn.innerHTML = `<div class="text-xs text-slate-500">${esc(v.id)} · ${esc(v.homeDepot || "—")}</div><div class="mt-1 text-sm font-semibold">${esc(v.code)}</div><div class="mt-1 text-xs text-slate-600">${esc(v.payloadMaxKg || "—")} kg · ${esc(v.volumeMaxCbm || "—")} cbm</div>`;
+          btn.addEventListener("click", () => openModal("Fahrzeugdetail", `<pre class="overflow-auto rounded-xl bg-slate-50 p-3 text-xs">${esc(JSON.stringify(v, null, 2))}</pre>`));
+          vehicleWrap.appendChild(btn);
+        }
+        renderSelectedRouteOrders();
+      }
+
+      async function loadCustomers() {
+        if (!state.auth.user) {
+          document.getElementById("customers-list").innerHTML = `<div class="rounded-xl border bg-white p-3 text-sm text-slate-600">Zugang setzen (x-user / x-permissions).</div>`;
+          return;
+        }
+        const q = document.getElementById("customers-query").value.trim();
+        const data = await api(`/api/customers?limit=100${q ? `&q=${encodeURIComponent(q)}` : ""}`);
+        const items = data.items || [];
+        state.customerById = new Map(items.map((it) => [it.id, it]));
+        const wrap = document.getElementById("customers-list");
+        wrap.innerHTML = "";
+        for (const it of items) {
+          const btn = document.createElement("button");
+          btn.className = infoCardClass();
+          btn.innerHTML = `<div class="text-xs text-slate-500">${esc(it.customerNo)} · ${it.active ? "aktiv" : "inaktiv"}</div><div class="mt-1 text-sm font-semibold">${esc(it.name)}</div><div class="mt-1 text-xs text-slate-600">Aktualisiert ${esc(fmtDateTime(it.updatedAt))}</div>`;
+          btn.addEventListener("click", () => openCustomer(it.id));
+          wrap.appendChild(btn);
+        }
+        if (!items.length) wrap.innerHTML = `<div class="rounded-xl border bg-white p-3 text-sm text-slate-600">Keine Kunden gefunden.</div>`;
+      }
+
+      async function openCustomer(customerId) {
+        const data = await api(`/api/customers?id=${encodeURIComponent(customerId)}`);
+        const contracts = await api(`/api/contracts?customerId=${encodeURIComponent(customerId)}&limit=50`).catch(() => ({ items: [] }));
+        const it = data.item || {};
+        const contractHtml = (contracts.items || [])
+          .map((c) => `<button data-open-contract="${esc(c.id)}" class="${infoCardClass()}"><div class="text-xs text-slate-500">${esc(c.contractNo)} · ${esc(c.status)}</div><div class="mt-1 text-sm font-semibold">${esc(c.title || c.id)}</div><div class="mt-1 text-xs text-slate-600">${esc(c.validFrom)} → ${esc(c.validTo || "offen")}</div></button>`)
+          .join("");
+        openModal(
+          `Kunde ${it.customerNo || customerId}`,
+          `
+          <div class="space-y-4">
+            <div class="rounded-2xl border bg-white p-3">
+              <div class="text-xs text-slate-500">${esc(it.customerNo || "—")} · ${it.active ? "aktiv" : "inaktiv"}</div>
+              <div class="mt-1 text-sm font-semibold">${esc(it.name || "—")}</div>
+              <div class="mt-1 text-xs text-slate-600">${esc(it.email || "—")} · ${esc(it.phone || "—")}</div>
+            </div>
+            <div class="grid grid-cols-1 gap-2 sm:grid-cols-2">
+              <button id="btn-customer-toggle" class="min-h-[44px] rounded-xl border bg-white px-3 text-sm font-medium">${it.active ? "Deaktivieren" : "Aktivieren"}</button>
+              <button id="btn-customer-contract" class="min-h-[44px] rounded-xl border bg-white px-3 text-sm font-medium">Vertrag vorbereiten</button>
+            </div>
+            <div>
+              <div class="mb-2 text-sm font-semibold">Verträge</div>
+              <div class="space-y-2">${contractHtml || `<div class="text-sm text-slate-600">Keine Verträge vorhanden.</div>`}</div>
+            </div>
+            <div class="rounded-xl border bg-slate-50 p-3 text-xs text-slate-700"><pre class="overflow-auto">${esc(JSON.stringify(it, null, 2))}</pre></div>
+          </div>
+          `,
+        );
+        document.getElementById("btn-customer-toggle").addEventListener("click", async () => {
+          await api("/api/customers/update", { method: "POST", body: { id: it.id, active: !it.active } });
+          closeModal();
+          await loadCustomers();
+        });
+        document.getElementById("btn-customer-contract").addEventListener("click", () => {
+          closeModal();
+          setView("contracts");
+          setInputValue("contract-customer-id", it.customerNo || it.id);
+        });
+        for (const b of document.querySelectorAll("[data-open-contract]")) b.addEventListener("click", () => openContract(b.getAttribute("data-open-contract")));
+      }
+
+      async function loadContracts() {
+        if (!state.auth.user) {
+          document.getElementById("contracts-list").innerHTML = `<div class="rounded-xl border bg-white p-3 text-sm text-slate-600">Zugang setzen (x-user / x-permissions).</div>`;
+          return;
+        }
+        const status = document.getElementById("contracts-filter-status").value;
+        const data = await api(`/api/contracts?limit=100${status ? `&status=${encodeURIComponent(status)}` : ""}`);
+        const items = data.items || [];
+        state.contractById = new Map(items.map((it) => [it.id, it]));
+        const wrap = document.getElementById("contracts-list");
+        wrap.innerHTML = "";
+        for (const it of items) {
+          const btn = document.createElement("button");
+          btn.className = infoCardClass();
+          btn.innerHTML = `<div class="text-xs text-slate-500">${esc(it.contractNo)} · ${esc(it.status)}</div><div class="mt-1 text-sm font-semibold">${esc(it.title || it.id)}</div><div class="mt-1 text-xs text-slate-600">${esc(it.customerId)} · ${esc(it.validFrom)} → ${esc(it.validTo || "offen")}</div>`;
+          btn.addEventListener("click", () => openContract(it.id));
+          wrap.appendChild(btn);
+        }
+        if (!items.length) wrap.innerHTML = `<div class="rounded-xl border bg-white p-3 text-sm text-slate-600">Keine Verträge vorhanden.</div>`;
+      }
+
+      async function openContract(contractId) {
+        const data = await api(`/api/contracts?id=${encodeURIComponent(contractId)}`);
+        const it = data.item || {};
+        const customer = it.customerId ? await api(`/api/customers?id=${encodeURIComponent(it.customerId)}`).catch(() => null) : null;
+        openModal(
+          `Vertrag ${it.contractNo || contractId}`,
+          `
+          <div class="space-y-4">
+            <div class="rounded-2xl border bg-white p-3">
+              <div class="text-xs text-slate-500">${esc(it.status || "—")} · ${esc(it.validFrom || "—")} → ${esc(it.validTo || "offen")}</div>
+              <div class="mt-1 text-sm font-semibold">${esc(it.title || it.contractNo || it.id || "—")}</div>
+              <div class="mt-1 text-xs text-slate-600">Kunde ${esc(customer?.item?.name || it.customerId || "—")}</div>
+            </div>
+            <div class="grid grid-cols-1 gap-2 sm:grid-cols-3">
+              <button data-contract-status="draft" class="btn-contract-status min-h-[44px] rounded-xl border bg-white px-3 text-sm font-medium">draft</button>
+              <button data-contract-status="active" class="btn-contract-status min-h-[44px] rounded-xl border bg-white px-3 text-sm font-medium">active</button>
+              <button data-contract-status="terminated" class="btn-contract-status min-h-[44px] rounded-xl border bg-white px-3 text-sm font-medium">terminated</button>
+            </div>
+            <div class="rounded-xl border bg-slate-50 p-3 text-xs text-slate-700"><pre class="overflow-auto">${esc(JSON.stringify(it, null, 2))}</pre></div>
+          </div>
+          `,
+        );
+        for (const b of document.querySelectorAll(".btn-contract-status")) {
+          b.addEventListener("click", async () => {
+            await api("/api/contracts/status", { method: "POST", body: { contractId, toStatus: b.getAttribute("data-contract-status"), reason: "ui" } });
+            closeModal();
+            await loadContracts();
+          });
+        }
+      }
+
+      async function openPriceList(priceListId) {
+        const [pl, items] = await Promise.all([
+          api(`/api/pricing/pricelists?id=${encodeURIComponent(priceListId)}`),
+          api(`/api/pricing/pricelists/items?priceListId=${encodeURIComponent(priceListId)}&limit=200`),
+        ]);
+        const item = pl.item || {};
+        const rows = items.items || [];
+        const html = rows
+          .map((r) => `<div class="rounded-xl border p-3"><div class="text-xs text-slate-500">${esc(r.itemType)} · ${esc(r.refCode)}</div><div class="mt-1 text-sm font-semibold">${esc(money(r.unitPriceCents, item.currency || "EUR"))}</div><div class="mt-1 text-xs text-slate-600">${esc(r.minQty)} → ${esc(r.maxQty === null ? "offen" : r.maxQty)} ${esc(r.unit)}</div></div>`)
+          .join("");
+        openModal(
+          `Preisliste ${item.code || priceListId}`,
+          `
+          <div class="space-y-4">
+            <div class="rounded-2xl border bg-white p-3">
+              <div class="text-xs text-slate-500">${esc(item.status || "—")} · ${esc(item.validFrom || "—")} → ${esc(item.validTo || "offen")}</div>
+              <div class="mt-1 text-sm font-semibold">${esc(item.name || item.code || "—")}</div>
+              <div class="mt-1 text-xs text-slate-600">${esc(item.currency || "EUR")}</div>
+            </div>
+            <div class="grid grid-cols-1 gap-2 sm:grid-cols-2">
+              <button id="btn-pricelist-add-service" class="min-h-[44px] rounded-xl border bg-white px-3 text-sm font-medium">Service-Position anlegen</button>
+              <button id="btn-pricelist-add-material" class="min-h-[44px] rounded-xl border bg-white px-3 text-sm font-medium">Material-Position anlegen</button>
+            </div>
+            <div class="space-y-2">${html || `<div class="text-sm text-slate-600">Keine Preispositionen vorhanden.</div>`}</div>
+          </div>
+          `,
+        );
+        document.getElementById("btn-pricelist-add-service").addEventListener("click", async () => {
+          const refCode = prompt("Service refCode:", "deliver_pickup");
+          if (!refCode) return;
+          const unitPriceCents = prompt("Preis in Cent:", "15000");
+          if (!unitPriceCents) return;
+          await api("/api/pricing/pricelists/items", {
+            method: "POST",
+            body: { priceListId, itemType: "service", refCode, unit: "order", minQty: 0, unitPriceCents: Number(unitPriceCents) },
+          });
+          closeModal();
+          await loadPricing();
+        });
+        document.getElementById("btn-pricelist-add-material").addEventListener("click", async () => {
+          const refCode = prompt("Material refCode:", document.getElementById("pricing-material-code").value.trim() || "");
+          if (!refCode) return;
+          const unitPriceCents = prompt("Preis in Cent:", "9900");
+          if (!unitPriceCents) return;
+          await api("/api/pricing/pricelists/items", {
+            method: "POST",
+            body: { priceListId, itemType: "material", refCode, unit: "t", minQty: 0, unitPriceCents: Number(unitPriceCents) },
+          });
+          closeModal();
+          await loadPricing();
+        });
+      }
+
+      async function openPricingCalculation(calcId) {
+        const data = await api(`/api/pricing/calculation?id=${encodeURIComponent(calcId)}`);
+        openModal("Pricing-Audit", `<pre class="overflow-auto rounded-xl bg-slate-50 p-3 text-xs">${esc(JSON.stringify(data.item || {}, null, 2))}</pre>`);
+      }
+
+      async function loadPricing() {
+        if (!state.auth.user) {
+          for (const id of ["pricing-kpis", "pricing-pricelist-list", "pricing-fee-list", "pricing-material-list", "pricing-history"]) {
+            document.getElementById(id).innerHTML = `<div class="rounded-xl border bg-white p-3 text-sm text-slate-600">Zugang setzen (x-user / x-permissions).</div>`;
+          }
+          return;
+        }
+        const orderId = document.getElementById("pricing-order-id").value.trim();
+        const [priceLists, fees, materials, history] = await Promise.all([
+          api("/api/pricing/pricelists?limit=50"),
+          api("/api/pricing/fees?limit=50"),
+          api("/api/items/materials?limit=50"),
+          orderId ? api(`/api/pricing/calculations?orderId=${encodeURIComponent(orderId)}&limit=20`).catch(() => ({ items: [] })) : Promise.resolve({ items: [] }),
+        ]);
+        state.priceListById = new Map((priceLists.items || []).map((it) => [it.id, it]));
+        state.pricingCalcById = new Map((history.items || []).map((it) => [it.id, it]));
+
+        const kpis = [
+          { title: "Preislisten", value: (priceLists.items || []).length, sub: "inkl. Draft/Active" },
+          { title: "Gebühren", value: (fees.items || []).length, sub: "aktive Gebühren" },
+          { title: "Materialien", value: (materials.items || []).length, sub: "Stammdaten" },
+          { title: "Audit-Snapshots", value: (history.items || []).length, sub: orderId ? `für ${orderId}` : "Order-ID setzen" },
+        ];
+        const kpiWrap = document.getElementById("pricing-kpis");
+        kpiWrap.innerHTML = "";
+        for (const k of kpis) {
+          const btn = document.createElement("button");
+          btn.className = infoCardClass();
+          btn.innerHTML = `<div class="text-xs font-medium text-slate-500">${esc(k.title)}</div><div class="mt-2 text-2xl font-semibold">${esc(k.value)}</div><div class="mt-1 text-xs text-slate-500">${esc(k.sub)}</div>`;
+          btn.addEventListener("click", () => openModal(k.title, `<div class="rounded-xl border bg-slate-50 p-3 text-sm text-slate-700">${esc(k.sub)}</div>`));
+          kpiWrap.appendChild(btn);
+        }
+
+        const listConfigs = [
+          { id: "pricing-pricelist-list", items: priceLists.items || [], render: (it) => `<div class="text-xs text-slate-500">${esc(it.code)} · ${esc(it.status)}</div><div class="mt-1 text-sm font-semibold">${esc(it.name)}</div><div class="mt-1 text-xs text-slate-600">${esc(it.validFrom)} → ${esc(it.validTo || "offen")} · ${esc(it.currency)}</div>`, click: (it) => openPriceList(it.id) },
+          { id: "pricing-fee-list", items: fees.items || [], render: (it) => `<div class="text-xs text-slate-500">${esc(it.code)} · ${esc(it.calculationMode)}</div><div class="mt-1 text-sm font-semibold">${esc(it.name)}</div><div class="mt-1 text-xs text-slate-600">${esc(money(it.amountCents, it.currency))} · ${esc(it.validFrom)}</div>`, click: (it) => openModal(`Gebühr ${it.code}`, `<pre class="overflow-auto rounded-xl bg-slate-50 p-3 text-xs">${esc(JSON.stringify(it, null, 2))}</pre>`) },
+          { id: "pricing-material-list", items: materials.items || [], render: (it) => `<div class="text-xs text-slate-500">${esc(it.code)} · ${esc(it.unit)}</div><div class="mt-1 text-sm font-semibold">${esc(it.name)}</div><div class="mt-1 text-xs text-slate-600">${esc(it.hazardClass || "ohne Klasse")}</div>`, click: (it) => openModal(`Material ${it.code}`, `<pre class="overflow-auto rounded-xl bg-slate-50 p-3 text-xs">${esc(JSON.stringify(it, null, 2))}</pre>`) },
+          { id: "pricing-history", items: history.items || [], render: (it) => `<div class="text-xs text-slate-500">${esc(it.algorithmVersion)} · ${esc(fmtDateTime(it.calculatedAt))}</div><div class="mt-1 text-sm font-semibold">${esc(money(it.totalCents, it.currency))}</div><div class="mt-1 text-xs text-slate-600">${esc(it.id)}</div>`, click: (it) => openPricingCalculation(it.id) },
+        ];
+        for (const cfg of listConfigs) {
+          const wrap = document.getElementById(cfg.id);
+          wrap.innerHTML = "";
+          for (const it of cfg.items) {
+            const btn = document.createElement("button");
+            btn.className = infoCardClass();
+            btn.innerHTML = cfg.render(it);
+            btn.addEventListener("click", () => cfg.click(it));
+            wrap.appendChild(btn);
+          }
+          if (!cfg.items.length) wrap.innerHTML = `<div class="rounded-xl border bg-white p-3 text-sm text-slate-600">Keine Einträge.</div>`;
+        }
+      }
+
+      async function readFileAsDataUrl(file) {
+        return await new Promise((resolve, reject) => {
+          const r = new FileReader();
+          r.onload = () => resolve(String(r.result || ""));
+          r.onerror = () => reject(new Error("file_read_failed"));
+          r.readAsDataURL(file);
+        });
+      }
+
+      function caseBadge(it) {
+        const p = it.priority || "medium";
+        const pr = p === "high" ? "bg-red-100 text-red-800" : p === "low" ? "bg-slate-100 text-slate-700" : "bg-amber-100 text-amber-800";
+        const ws = it.workState || "created";
+        const wsCls = ws === "in_progress" ? "bg-emerald-100 text-emerald-800" : ws === "waiting_parts" ? "bg-purple-100 text-purple-800" : "bg-slate-100 text-slate-700";
+        return `<span class="rounded-lg px-2 py-1 text-xs font-medium ${pr}">${esc(p)}</span><span class="rounded-lg px-2 py-1 text-xs font-medium ${wsCls}">${esc(ws)}</span>`;
+      }
+
+      async function loadAssigneesIntoSelect() {
+        const sel = document.getElementById("pool-filter-assignee");
+        const keep = sel.value;
+        sel.innerHTML = `<option value="">Alle</option>`;
+        if (!state.auth.user) return;
+        const data = await api("/api/workshop/assignees");
+        for (const it of data.items || []) {
+          const opt = document.createElement("option");
+          opt.value = it.assignee;
+          opt.textContent = `${it.assignee} (${it.open})`;
+          sel.appendChild(opt);
+        }
+        sel.value = keep;
+      }
+
+      async function loadPool() {
+        if (!state.auth.user) {
+          document.getElementById("pool-list").innerHTML = `<div class="rounded-xl border bg-white p-3 text-sm text-slate-600">Zugang setzen (x-user / x-permissions).</div>`;
+          return;
+        }
+        await loadAssigneesIntoSelect();
+        const priority = document.getElementById("pool-filter-priority").value;
+        const assigned = document.getElementById("pool-filter-assigned").value;
+        const assignedTo = document.getElementById("pool-filter-assignee").value;
+        const workState = document.getElementById("pool-filter-workstate").value;
+        const q = new URLSearchParams();
+        q.set("limit", "100");
+        if (priority) q.set("priority", priority);
+        if (assigned) q.set("assigned", assigned);
+        if (assignedTo) q.set("assignedTo", assignedTo);
+        if (workState) q.set("workState", workState);
+        const data = await api(`/api/workshop/orders/pool?${q.toString()}`);
+        const list = data.items || [];
+        state.poolById = new Map(list.map((x) => [x.id, x]));
+        document.getElementById("pool-meta").textContent = `${list.length} Einträge`;
+        const wrap = document.getElementById("pool-list");
+        wrap.innerHTML = "";
+        for (const it of list) {
+          const el = document.createElement("div");
+          el.className = "rounded-xl border bg-white p-3";
+          el.innerHTML = `
+            <div class="flex items-start justify-between gap-2">
+              <div class="min-w-0">
+                <div class="text-xs text-slate-500">${esc(it.vehicleId)} · ${esc(it.poolStatus)}</div>
+                <div class="mt-1 truncate text-sm font-semibold">${esc(it.title)}</div>
+                <div class="mt-2 flex flex-wrap items-center gap-2">${caseBadge(it)}<span class="text-xs text-slate-500">${esc(it.assignedTo || "—")}</span></div>
+              </div>
+              <div class="flex flex-col gap-2">
+                <button data-case="${esc(it.id)}" class="btn-case min-h-[44px] rounded-xl border bg-white px-3 text-sm font-medium">Öffnen</button>
+              </div>
+            </div>
+          `;
+          wrap.appendChild(el);
+        }
+        if (!list.length) {
+          wrap.innerHTML = `<div class="rounded-xl border bg-white p-3 text-sm text-slate-600">Keine Aufträge (Filter).</div>`;
+        }
+        for (const b of document.querySelectorAll(".btn-case")) {
+          b.addEventListener("click", () => openCase(b.getAttribute("data-case")));
+        }
+      }
+
+      async function openCase(caseId) {
+        const it = state.poolById.get(caseId) || { id: caseId, title: caseId, vehicleId: "", assignedTo: "", workState: "" };
+        const msg = await api(`/api/workshop/orders/messages?caseId=${encodeURIComponent(caseId)}&limit=200`).catch(() => ({ items: [] }));
+        const appr = await api(`/api/workshop/orders/approvals?caseId=${encodeURIComponent(caseId)}&limit=200`).catch(() => ({ items: [] }));
+        const sig = await api(`/api/workshop/orders/signatures?caseId=${encodeURIComponent(caseId)}&limit=20`).catch(() => ({ items: [] }));
+
+        const messagesHtml = (msg.items || [])
+          .map((m) => `<div class="rounded-xl border p-3"><div class="text-xs text-slate-500">${esc(m.username)} · ${esc(m.createdAt)}</div><div class="mt-1 text-sm">${esc(m.message)}</div></div>`)
+          .join("");
+        const approvalsHtml = (appr.items || [])
+          .map((a) => `<div class="rounded-xl border p-3"><div class="text-xs text-slate-500">${esc(a.status)} · ${esc(a.requestedBy)} · ${esc(a.requestedAt)}</div><div class="mt-1 text-sm font-semibold">${esc(a.decision || "—")}</div><div class="mt-1 text-xs text-slate-600">${esc(a.note || "")}</div><div class="mt-2 text-xs text-slate-500">ID: ${esc(a.id)}</div></div>`)
+          .join("");
+        const sigHtml = (sig.items || [])
+          .map((s) => `<div class="rounded-xl border p-3"><div class="text-xs text-slate-500">${esc(s.signedBy)} · ${esc(s.signedAt)}</div><div class="mt-1 text-sm">${esc((s.signature && s.signature.type) || "—")} · ${esc((s.signature && s.signature.sha256) || "")}</div></div>`)
+          .join("");
+
+        openModal(
+          `Auftrag ${caseId}`,
+          `
+          <div class="space-y-4">
+            <div class="rounded-2xl border bg-white p-3">
+              <div class="text-xs text-slate-500">${esc(it.vehicleId || "—")} · ${esc(it.poolStatus || it.status || "—")}</div>
+              <div class="mt-1 text-sm font-semibold">${esc(it.title || "")}</div>
+              <div class="mt-2 flex flex-wrap items-center gap-2">${caseBadge(it)}<span class="text-xs text-slate-500">${esc(it.assignedTo || "—")}</span></div>
+            </div>
+
+            <div class="grid grid-cols-1 gap-2 sm:grid-cols-2">
+              <button id="btn-assign" class="min-h-[44px] rounded-xl border bg-white px-3 text-sm font-medium">Zuweisen</button>
+              <button id="btn-status" class="min-h-[44px] rounded-xl border bg-white px-3 text-sm font-medium">Status</button>
+              <button id="btn-message" class="min-h-[44px] rounded-xl border bg-white px-3 text-sm font-medium">Nachricht</button>
+              <button id="btn-approval" class="min-h-[44px] rounded-xl border bg-white px-3 text-sm font-medium">Freigabe</button>
+              <button id="btn-sign" class="min-h-[44px] rounded-xl border bg-white px-3 text-sm font-medium">Signieren</button>
+              <button id="btn-photo" class="min-h-[44px] rounded-xl border bg-white px-3 text-sm font-medium">Foto</button>
+            </div>
+
+            <div>
+              <div class="text-sm font-semibold">Nachrichten</div>
+              <div class="mt-2 space-y-2">${messagesHtml || `<div class="text-sm text-slate-600">—</div>`}</div>
+            </div>
+            <div>
+              <div class="text-sm font-semibold">Freigaben</div>
+              <div class="mt-2 space-y-2">${approvalsHtml || `<div class="text-sm text-slate-600">—</div>`}</div>
+            </div>
+            <div>
+              <div class="text-sm font-semibold">Signaturen</div>
+              <div class="mt-2 space-y-2">${sigHtml || `<div class="text-sm text-slate-600">—</div>`}</div>
+            </div>
+          </div>
+          `,
+        );
+
+        document.getElementById("btn-assign").addEventListener("click", async () => {
+          const assignedTo = prompt("Zuweisen an (Name/ID):", it.assignedTo || "");
+          if (assignedTo === null) return;
+          await api("/api/workshop/orders/assign", { method: "POST", body: { caseId, assignedTo: assignedTo.trim() || null } });
+          closeModal();
+          await loadPool();
+        });
+
+        document.getElementById("btn-status").addEventListener("click", async () => {
+          const ws = prompt("workState: created | assigned | in_progress | waiting_parts | done", it.workState || "assigned");
+          if (!ws) return;
+          await api("/api/workshop/orders/status", { method: "POST", body: { caseId, workState: ws.trim(), reason: "ui" } });
+          closeModal();
+          await loadPool();
+        });
+
+        document.getElementById("btn-message").addEventListener("click", async () => {
+          const message = prompt("Nachricht:", "");
+          if (!message) return;
+          await api("/api/workshop/orders/message", { method: "POST", body: { caseId, message } });
+          closeModal();
+          await loadPool();
+        });
+
+        document.getElementById("btn-approval").addEventListener("click", async () => {
+          const note = prompt("Freigabe anfragen (Notiz optional):", "");
+          if (note === null) return;
+          await api("/api/workshop/orders/approval/request", { method: "POST", body: { caseId, note: note || null } });
+          closeModal();
+          await loadPool();
+        });
+
+        document.getElementById("btn-sign").addEventListener("click", async () => {
+          const typed = prompt("Signatur (Name):", "");
+          if (!typed) return;
+          await api("/api/workshop/orders/sign", { method: "POST", body: { caseId, signature: { type: "typed", name: typed } } });
+          closeModal();
+          await loadPool();
+        });
+
+        document.getElementById("btn-photo").addEventListener("click", async () => {
+          const p = await api(`/api/workshop/orders/photo?caseId=${encodeURIComponent(caseId)}`).catch(() => null);
+          if (!p || !p.item || !p.item.base64) {
+            openModal("Foto", `<div class="text-sm text-slate-600">Kein Foto vorhanden.</div>`);
+            return;
+          }
+          openModal("Foto", `<img class="w-full rounded-xl border" src="data:${esc(p.item.mimeType || "image/jpeg")};base64,${esc(p.item.base64)}" />`);
+        });
+      }
+
+      document.getElementById("btn-refresh-pool").addEventListener("click", () => loadPool().catch(() => {}));
+      for (const id of ["pool-filter-priority", "pool-filter-assigned", "pool-filter-assignee", "pool-filter-workstate"]) {
+        document.getElementById(id).addEventListener("change", () => loadPool().catch(() => {}));
+      }
+
+      document.getElementById("btn-open-assignees").addEventListener("click", async () => {
+        if (!state.auth.user) return;
+        const data = await api("/api/workshop/assignees");
+        const html = (data.items || [])
+          .map(
+            (a) =>
+              `<div class="rounded-xl border p-3"><div class="text-sm font-semibold">${esc(a.assignee)}</div><div class="mt-1 text-xs text-slate-600">Offen ${a.open} · In Arbeit ${a.inProgress} · Teile fehlen ${a.waitingParts}</div></div>`,
+          )
+          .join("");
+        openModal("Mitarbeiter", html || `<div class="text-sm text-slate-600">—</div>`);
+      });
+
+      document.getElementById("btn-new-case").addEventListener("click", () => {
+        openModal(
+          "Neuer Auftrag",
+          `
+          <div class="space-y-3">
+            <label class="block text-xs text-slate-600">Vehicle ID<input id="nc-veh" class="mt-1 w-full min-h-[44px] rounded-xl border bg-white px-3 text-sm" placeholder="veh_01" /></label>
+            <label class="block text-xs text-slate-600">Titel<input id="nc-title" class="mt-1 w-full min-h-[44px] rounded-xl border bg-white px-3 text-sm" placeholder="z.B. Bremsen prüfen" /></label>
+            <label class="block text-xs text-slate-600">Beschreibung (min. 20 Zeichen)<textarea id="nc-desc" class="mt-1 w-full rounded-xl border bg-white px-3 py-2 text-sm" rows="4"></textarea></label>
+            <div class="grid grid-cols-2 gap-2">
+              <label class="text-xs text-slate-600">Priorität<select id="nc-prio" class="mt-1 w-full min-h-[44px] rounded-xl border bg-white px-3 text-sm"><option value="medium">Mittel</option><option value="high">Hoch</option><option value="low">Niedrig</option></select></label>
+              <label class="text-xs text-slate-600">Severity<select id="nc-sev" class="mt-1 w-full min-h-[44px] rounded-xl border bg-white px-3 text-sm"><option value="warning">warning</option><option value="critical">critical</option><option value="info">info</option></select></label>
+            </div>
+            <label class="block text-xs text-slate-600">Foto (optional)<input id="nc-photo" type="file" accept="image/*" class="mt-1 w-full" /></label>
+            <button id="nc-submit" class="min-h-[44px] w-full rounded-xl bg-slate-900 px-3 text-sm font-medium text-white">Anlegen</button>
+          </div>
+          `,
+        );
+        document.getElementById("nc-submit").addEventListener("click", async () => {
+          const vehicleId = document.getElementById("nc-veh").value.trim();
+          const title = document.getElementById("nc-title").value.trim();
+          const description = document.getElementById("nc-desc").value.trim();
+          const priority = document.getElementById("nc-prio").value;
+          const severity = document.getElementById("nc-sev").value;
+          const f = document.getElementById("nc-photo").files && document.getElementById("nc-photo").files[0] ? document.getElementById("nc-photo").files[0] : null;
+          const photo = f ? { mimeType: f.type, base64: await readFileAsDataUrl(f) } : null;
+          await api("/api/workshop/orders", { method: "POST", body: { vehicleId, title, description, priority, severity, photo } });
+          closeModal();
+          await loadPool();
+        });
+      });
+
+      async function loadSlots() {
+        if (!state.auth.user) {
+          document.getElementById("slot-grid").innerHTML = `<div class="rounded-xl border bg-white p-3 text-sm text-slate-600">Zugang setzen (x-user / x-permissions).</div>`;
+          return;
+        }
+        const assignee = document.getElementById("slot-assignee").value.trim();
+        const startDay = document.getElementById("slot-start").value;
+        const endDay = document.getElementById("slot-end").value;
+        const slots = Math.max(1, Math.min(12, Number(document.getElementById("slot-count").value) || 6));
+        if (!assignee || !startDay || !endDay) {
+          document.getElementById("slot-grid").innerHTML = `<div class="rounded-xl border bg-white p-3 text-sm text-slate-600">Assignee, Start und Ende setzen.</div>`;
+          return;
+        }
+        const data = await api(`/api/workshop/planning/slots?assignee=${encodeURIComponent(assignee)}&startDay=${encodeURIComponent(startDay)}&endDay=${encodeURIComponent(endDay)}`);
+        const items = data.items || [];
+        const byKey = new Map(items.map((x) => [`${x.day}:${x.slotIndex}`, x]));
+        const days = [];
+        for (let d = new Date(`${startDay}T00:00:00Z`); d <= new Date(`${endDay}T00:00:00Z`); d = new Date(d.getTime() + 24 * 60 * 60 * 1000)) {
+          days.push(d.toISOString().slice(0, 10));
+        }
+        const grid = document.createElement("div");
+        grid.className = "grid gap-2";
+        for (const day of days) {
+          const row = document.createElement("div");
+          row.className = "rounded-2xl border bg-white p-3";
+          row.innerHTML = `<div class="text-sm font-semibold">${esc(day)}</div>`;
+          const slotsWrap = document.createElement("div");
+          slotsWrap.className = "mt-2 grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6";
+          for (let i = 1; i <= slots; i++) {
+            const it = byKey.get(`${day}:${i}`) || null;
+            const btn = document.createElement("button");
+            btn.className = "min-h-[56px] rounded-xl border bg-white px-3 text-left text-sm hover:bg-slate-50";
+            btn.innerHTML = `<div class="text-xs text-slate-500">Slot ${i}</div><div class="mt-1 font-semibold">${esc(it && it.caseId ? it.caseId : "—")}</div>`;
+            btn.addEventListener("click", async () => {
+              const caseId = prompt("Case ID (leer = löschen):", it && it.caseId ? it.caseId : "");
+              if (caseId === null) return;
+              const notes = prompt("Notiz (optional):", it && it.notes ? it.notes : "") || null;
+              await api("/api/workshop/planning/slots/set", { method: "POST", body: { day, slotIndex: i, assignee, caseId: caseId.trim() || null, notes } });
+              await loadSlots();
+            });
+            slotsWrap.appendChild(btn);
+          }
+          row.appendChild(slotsWrap);
+          grid.appendChild(row);
+        }
+        const wrap = document.getElementById("slot-grid");
+        wrap.innerHTML = "";
+        wrap.appendChild(grid);
+      }
+
+      document.getElementById("btn-refresh-slots").addEventListener("click", () => loadSlots().catch(() => {}));
+
+      async function loadInventory() {
+        if (!state.auth.user) {
+          document.getElementById("stock-list").innerHTML = `<div class="rounded-xl border bg-white p-3 text-sm text-slate-600">Zugang setzen (x-user / x-permissions).</div>`;
+          return;
+        }
+        const lowOnly = document.getElementById("stock-low-only").checked;
+        const stock = await api(`/api/workshop/inventory/stock?lowOnly=${lowOnly ? "true" : "false"}`);
+        const wrap = document.getElementById("stock-list");
+        wrap.innerHTML = "";
+        for (const s of stock.items || []) {
+          const el = document.createElement("div");
+          el.className = `rounded-xl border p-3 ${s.low ? "bg-amber-50 border-amber-200" : "bg-white"}`;
+          el.innerHTML = `<div class="text-xs text-slate-500">${esc(s.locationCode)} · min ${esc(s.minQty)}</div><div class="mt-1 text-sm font-semibold">${esc(s.partNo)} · ${esc(s.qty)}</div><div class="mt-1 text-xs text-slate-600">${esc(s.description)}</div>`;
+          wrap.appendChild(el);
+        }
+        if (!(stock.items || []).length) wrap.innerHTML = `<div class="rounded-xl border bg-white p-3 text-sm text-slate-600">Kein Bestand.</div>`;
+        await loadMovements();
+      }
+
+      async function loadMovements() {
+        const q = new URLSearchParams();
+        q.set("limit", "100");
+        if (state.movementFilters.serial) q.set("serial", state.movementFilters.serial);
+        if (state.movementFilters.batchNo) q.set("batchNo", state.movementFilters.batchNo);
+        if (state.movementFilters.partNo) q.set("partNo", state.movementFilters.partNo);
+        const data = await api(`/api/workshop/inventory/movements?${q.toString()}`);
+        const wrap = document.getElementById("movement-list");
+        wrap.innerHTML = "";
+        for (const m of data.items || []) {
+          const el = document.createElement("div");
+          el.className = "rounded-xl border bg-white p-3";
+          el.innerHTML = `<div class="text-xs text-slate-500">${esc(m.occurredAt)} · ${esc(m.movementType)} · ${esc(m.username)}</div><div class="mt-1 text-sm font-semibold">${esc(m.partNo)} · ${esc(m.qty)}</div><div class="mt-1 text-xs text-slate-600">${esc(m.fromLocationCode || "—")} → ${esc(m.toLocationCode || "—")} · ${esc(m.reason || "")}</div>`;
+          wrap.appendChild(el);
+        }
+        if (!(data.items || []).length) wrap.innerHTML = `<div class="rounded-xl border bg-white p-3 text-sm text-slate-600">Keine Bewegungen.</div>`;
+      }
+
+      document.getElementById("stock-low-only").addEventListener("change", () => loadInventory().catch(() => {}));
+      document.getElementById("btn-refresh-movements").addEventListener("click", () => loadMovements().catch(() => {}));
+      document.getElementById("btn-open-movement-filter").addEventListener("click", () => {
+        openModal(
+          "Filter",
+          `
+          <div class="space-y-3">
+            <label class="block text-xs text-slate-600">partNo<input id="mf-part" class="mt-1 w-full min-h-[44px] rounded-xl border bg-white px-3 text-sm" value="${esc(state.movementFilters.partNo)}" /></label>
+            <label class="block text-xs text-slate-600">Charge<input id="mf-batch" class="mt-1 w-full min-h-[44px] rounded-xl border bg-white px-3 text-sm" value="${esc(state.movementFilters.batchNo)}" /></label>
+            <label class="block text-xs text-slate-600">Serial<input id="mf-serial" class="mt-1 w-full min-h-[44px] rounded-xl border bg-white px-3 text-sm" value="${esc(state.movementFilters.serial)}" /></label>
+            <button id="mf-apply" class="min-h-[44px] w-full rounded-xl bg-slate-900 px-3 text-sm font-medium text-white">Anwenden</button>
+          </div>
+          `,
+        );
+        document.getElementById("mf-apply").addEventListener("click", async () => {
+          state.movementFilters.partNo = document.getElementById("mf-part").value.trim();
+          state.movementFilters.batchNo = document.getElementById("mf-batch").value.trim();
+          state.movementFilters.serial = document.getElementById("mf-serial").value.trim();
+          closeModal();
+          await loadMovements();
+        });
+      });
+
+      document.getElementById("btn-create-move").addEventListener("click", async () => {
+        const movementType = document.getElementById("mv-type").value;
+        const qty = Number(document.getElementById("mv-qty").value);
+        const partNo = document.getElementById("mv-partNo").value.trim();
+        const unitId = document.getElementById("mv-unitId").value.trim() || null;
+        const caseId = document.getElementById("mv-caseId").value.trim() || null;
+        const fromLocationCode = document.getElementById("mv-from").value.trim() || null;
+        const toLocationCode = document.getElementById("mv-to").value.trim() || null;
+        const batchNo = document.getElementById("mv-batch").value.trim() || null;
+        const serialsRaw = document.getElementById("mv-serials").value.trim();
+        const serialNumbers = serialsRaw ? serialsRaw.split(",").map((s) => s.trim()).filter(Boolean) : [];
+        const reason = document.getElementById("mv-reason").value.trim() || null;
+        const identifiers = { batchNo: batchNo || undefined, serialNumbers: serialNumbers.length ? serialNumbers : undefined };
+        await api("/api/workshop/inventory/move", { method: "POST", body: { movementType, partNo, qty, fromLocationCode, toLocationCode, unitId, caseId, identifiers, reason } });
+        document.getElementById("mv-qty").value = "";
+        document.getElementById("mv-serials").value = "";
+        await loadInventory();
+      });
+
+      async function loadInspections() {
+        if (!state.auth.user) {
+          document.getElementById("insp-list").innerHTML = `<div class="rounded-xl border bg-white p-3 text-sm text-slate-600">Zugang setzen (x-user / x-permissions).</div>`;
+          return;
+        }
+        const status = document.getElementById("insp-filter-status").value;
+        const q = new URLSearchParams();
+        q.set("limit", "200");
+        if (status) q.set("status", status);
+        const data = await api(`/api/workshop/inspections?${q.toString()}`);
+        const wrap = document.getElementById("insp-list");
+        wrap.innerHTML = "";
+        for (const it of data.items || []) {
+          const el = document.createElement("div");
+          el.className = "rounded-xl border bg-white p-3";
+          const btn = it.status === "scheduled" ? `<button data-insp="${esc(it.id)}" class="btn-complete-insp mt-2 min-h-[44px] rounded-xl border bg-white px-3 text-sm font-medium">Abschließen</button>` : "";
+          const pdf = it.reportPdf && it.reportPdf.sha256 ? `<div class="mt-1 text-xs text-slate-500">PDF: ${esc(it.reportPdf.sha256)}</div>` : "";
+          el.innerHTML = `<div class="text-xs text-slate-500">${esc(it.unitId)} · ${esc(it.inspectionType)} · ${esc(it.dueMonth)}</div><div class="mt-1 text-sm font-semibold">${esc(it.status)}</div><div class="mt-1 text-xs text-slate-600">Fenster ${esc(it.dueFrom)} → ${esc(it.dueTo)}</div>${pdf}${btn}`;
+          wrap.appendChild(el);
+        }
+        if (!(data.items || []).length) wrap.innerHTML = `<div class="rounded-xl border bg-white p-3 text-sm text-slate-600">Keine Prüfungen.</div>`;
+        for (const b of document.querySelectorAll(".btn-complete-insp")) {
+          b.addEventListener("click", () => completeInspection(b.getAttribute("data-insp")));
+        }
+      }
+
+      async function completeInspection(id) {
+        openModal(
+          "Prüfung abschließen",
+          `
+          <div class="space-y-3">
+            <div class="text-xs text-slate-600">ID: ${esc(id)}</div>
+            <label class="block text-xs text-slate-600">PDF (optional)<input id="ci-pdf" type="file" accept="application/pdf" class="mt-1 w-full" /></label>
+            <button id="ci-submit" class="min-h-[44px] w-full rounded-xl bg-slate-900 px-3 text-sm font-medium text-white">Abschließen</button>
+          </div>
+          `,
+        );
+        document.getElementById("ci-submit").addEventListener("click", async () => {
+          const f = document.getElementById("ci-pdf").files && document.getElementById("ci-pdf").files[0] ? document.getElementById("ci-pdf").files[0] : null;
+          const reportPdf = f ? { mimeType: f.type || "application/pdf", base64: await readFileAsDataUrl(f) } : null;
+          await api("/api/workshop/inspections/complete", { method: "POST", body: { id, reportPdf } });
+          closeModal();
+          await loadInspections();
+        });
+      }
+
+      document.getElementById("btn-refresh-insp").addEventListener("click", () => loadInspections().catch(() => {}));
+      document.getElementById("insp-filter-status").addEventListener("change", () => loadInspections().catch(() => {}));
+      document.getElementById("btn-schedule-insp").addEventListener("click", async () => {
+        const unitId = document.getElementById("insp-unit").value.trim();
+        const inspectionType = document.getElementById("insp-type").value.trim();
+        const dueMonth = document.getElementById("insp-month").value.trim();
+        await api("/api/workshop/inspections/schedule", { method: "POST", body: { unitId, inspectionType, dueMonth } });
+        await loadInspections();
+      });
+
+      document.getElementById("btn-refresh-disposition").addEventListener("click", () => loadDisposition().catch(() => {}));
+      document.getElementById("btn-clear-route-selection").addEventListener("click", () => {
+        state.selectedRouteOrderIds.clear();
+        renderSelectedRouteOrders();
+      });
+      document.getElementById("btn-plan-route").addEventListener("click", async () => {
+        const day = document.getElementById("disp-day").value.trim();
+        const depotCode = document.getElementById("disp-depot").value.trim() || null;
+        const vehicleId = document.getElementById("disp-vehicle").value.trim();
+        const slotMinutes = Number(document.getElementById("disp-slot-minutes").value || 30);
+        const routeStartAtRaw = document.getElementById("disp-route-start").value;
+        const routeStartAt = routeStartAtRaw ? new Date(routeStartAtRaw).toISOString() : null;
+        const orderIds = Array.from(state.selectedRouteOrderIds);
+        await api("/api/waste/routes/plan", {
+          method: "POST",
+          body: {
+            day,
+            depotCode,
+            vehicleId,
+            slotMinutes,
+            routeStartAt,
+            orderIds: orderIds.length ? orderIds : undefined,
+          },
+        });
+        state.selectedRouteOrderIds.clear();
+        await loadDisposition();
+      });
+      document.getElementById("disp-day").addEventListener("change", () => loadDisposition().catch(() => {}));
+      document.getElementById("disp-depot").addEventListener("change", () => loadDisposition().catch(() => {}));
+
+      document.getElementById("btn-refresh-customers").addEventListener("click", () => loadCustomers().catch(() => {}));
+      document.getElementById("customers-query").addEventListener("input", () => scheduleRefresh());
+      document.getElementById("btn-create-customer").addEventListener("click", async () => {
+        await api("/api/customers", {
+          method: "POST",
+          body: {
+            customerNo: document.getElementById("cust-no").value.trim(),
+            name: document.getElementById("cust-name").value.trim(),
+            email: document.getElementById("cust-email").value.trim() || undefined,
+            phone: document.getElementById("cust-phone").value.trim() || undefined,
+            legalForm: document.getElementById("cust-legal-form").value.trim() || undefined,
+            vatId: document.getElementById("cust-vat-id").value.trim() || undefined,
+            active: true,
+          },
+        });
+        for (const id of ["cust-no", "cust-name", "cust-email", "cust-phone", "cust-legal-form", "cust-vat-id"]) document.getElementById(id).value = "";
+        await loadCustomers();
+      });
+
+      document.getElementById("btn-refresh-contracts").addEventListener("click", () => loadContracts().catch(() => {}));
+      document.getElementById("contracts-filter-status").addEventListener("change", () => loadContracts().catch(() => {}));
+      document.getElementById("btn-create-contract").addEventListener("click", async () => {
+        await api("/api/contracts", {
+          method: "POST",
+          body: {
+            customerId: document.getElementById("contract-customer-id").value.trim(),
+            contractNo: document.getElementById("contract-no").value.trim(),
+            status: document.getElementById("contract-status").value,
+            title: document.getElementById("contract-title").value.trim() || undefined,
+            validFrom: document.getElementById("contract-valid-from").value,
+            validTo: document.getElementById("contract-valid-to").value || undefined,
+          },
+        });
+        await loadContracts();
+      });
+
+      document.getElementById("btn-refresh-pricing").addEventListener("click", () => loadPricing().catch(() => {}));
+      document.getElementById("btn-calculate-pricing").addEventListener("click", async () => {
+        await api("/api/pricing/calculate", {
+          method: "POST",
+          body: {
+            orderId: document.getElementById("pricing-order-id").value.trim(),
+            priceListId: document.getElementById("pricing-price-list-id").value.trim() || undefined,
+            at: document.getElementById("pricing-at").value || undefined,
+            force: document.getElementById("pricing-force").checked,
+          },
+        });
+        await loadPricing();
+      });
+      document.getElementById("btn-create-material").addEventListener("click", async () => {
+        await api("/api/items/materials", {
+          method: "POST",
+          body: {
+            code: document.getElementById("pricing-material-code").value.trim(),
+            name: document.getElementById("pricing-material-name").value.trim(),
+            unit: "t",
+            active: true,
+          },
+        });
+        await loadPricing();
+      });
+      document.getElementById("btn-create-pricelist").addEventListener("click", async () => {
+        await api("/api/pricing/pricelists", {
+          method: "POST",
+          body: {
+            code: document.getElementById("pricing-pl-code").value.trim(),
+            name: document.getElementById("pricing-pl-name").value.trim(),
+            currency: "EUR",
+            status: "active",
+            validFrom: document.getElementById("pricing-pl-valid-from").value,
+          },
+        });
+        await loadPricing();
+      });
+      document.getElementById("btn-create-fee").addEventListener("click", async () => {
+        const amount = prompt("Gebühr in Cent:", "150");
+        if (!amount) return;
+        const mode = prompt("Mode: per_order | per_ton | per_container", "per_ton");
+        if (!mode) return;
+        await api("/api/pricing/fees", {
+          method: "POST",
+          body: {
+            code: document.getElementById("pricing-fee-code").value.trim(),
+            name: document.getElementById("pricing-fee-code").value.trim(),
+            calculationMode: mode.trim(),
+            amountCents: Number(amount),
+            currency: "EUR",
+            validFrom: document.getElementById("pricing-pl-valid-from").value,
+          },
+        });
+        await loadPricing();
+      });
+
+      document.getElementById("btn-settings").addEventListener("click", () => {
+        openModal(
+          "Zugang",
+          `
+          <div class="space-y-3">
+            <label class="block text-xs text-slate-600">x-user<input id="auth-user" class="mt-1 w-full min-h-[44px] rounded-xl border bg-white px-3 text-sm" value="${esc(state.auth.user)}" /></label>
+            <label class="block text-xs text-slate-600">x-permissions (CSV)<input id="auth-perms" class="mt-1 w-full min-h-[44px] rounded-xl border bg-white px-3 text-sm" value="${esc(state.auth.permissions)}" placeholder="FLEET_ADMIN,CUSTOMER_MANAGE,CONTRACT_MANAGE,PRICING_MANAGE,WASTE_ROUTE_PLAN" /></label>
+            <button id="auth-save" class="min-h-[44px] w-full rounded-xl bg-slate-900 px-3 text-sm font-medium text-white">Speichern</button>
+          </div>
+          `,
+        );
+        document.getElementById("auth-save").addEventListener("click", () => {
+          const u = document.getElementById("auth-user").value.trim();
+          const p = document.getElementById("auth-perms").value.trim();
+          saveAuth(u, p);
+          closeModal();
+          refreshView().catch(() => {});
+        });
+      });
+
+      const today = new Date();
+      const todayYmd = today.toISOString().slice(0, 10);
+      const routeStart = new Date(today.getTime() + 60 * 60 * 1000);
+      const routeStartLocal = new Date(routeStart.getTime() - routeStart.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+      for (const id of ["disp-day", "contract-valid-from", "pricing-at", "pricing-pl-valid-from"]) {
+        if (document.getElementById(id) && !document.getElementById(id).value) document.getElementById(id).value = todayYmd;
+      }
+      if (!document.getElementById("disp-route-start").value) document.getElementById("disp-route-start").value = routeStartLocal;
+
+      setView("dashboard");
+      connectStream();
+    </script>
+  </body>
+</html>

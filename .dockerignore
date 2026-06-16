@@ -1,0 +1,7 @@
+.git
+.tools
+.local
+postgres-data
+redis-data
+caddy-data
+*.log

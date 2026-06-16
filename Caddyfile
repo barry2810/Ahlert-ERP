@@ -1,0 +1,18 @@
+erp.ahlert24.de {
+  tls internal
+  root * /srv
+  file_server
+
+  handle /api/* {
+    reverse_proxy api:3000
+  }
+}
+
+http://localhost, http://127.0.0.1 {
+  root * /srv
+  file_server
+
+  handle /api/* {
+    reverse_proxy api:3000
+  }
+}
