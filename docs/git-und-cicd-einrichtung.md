@@ -290,23 +290,21 @@ Erfolgreich verifiziert:
   - `allow_rebase_merge=true`
 - SSH-basierter Git-Workflow gegen GitHub funktioniert weiterhin fuer Clone/Pull/Push
 
-Extern blockiert:
+Hinweise/Trade-offs:
 
-- Branch Protection fuer `main`:
-- PR-Erstellung per GitHub-CLI/API:
-  - GitHub meldet `Resource not accessible by personal access token`
-  - Ursache ist ein zu eingeschraenkter Token fuer Pull-Request-Operationen.
+- Branch Protection ist aktiv, seit das Repository `public` ist.
+- GitHub laesst kein Self-Approval zu:
+  - API-Fehler: `Review Can not approve your own pull request`
+  - Konsequenz: Wenn `required_approving_review_count=1` gesetzt ist, braucht es mindestens eine zweite Person (Collaborator/Team) fuer Reviews, sonst koennen PRs nicht gemerged werden.
+  - Alternative fuer Single-Maintainer-Repos: `required_approving_review_count=0` und weiterhin `openapi` als Required Check erzwingen.
 
-Empfohlene Abhilfe:
+Empfohlene Token-Rechte (fine-grained PAT) fuer Automatisierung:
 
-- Fuer Branch Protection:
-  - GitHub Pro aktivieren oder Repository oeffentlich machen
-- Fuer vollautomatische PR-Workflow-Verifizierung:
-  - Fine-grained PAT mit mindestens folgenden Repo-Rechten verwenden:
-    - `Pull requests: Read and write`
-    - `Contents: Read and write`
-    - `Actions: Read`
-    - `Administration: Read and write` (wenn Branch Protection gesetzt werden soll)
+- `Pull requests: Read and write`
+- `Contents: Read and write`
+- Optional:
+  - `Actions: Read` (Check-Runs abfragen)
+  - `Administration: Read and write` (Branch Protection setzen/anpassen)
 
 ### 2.3 Remote-Repository erstellen
 
