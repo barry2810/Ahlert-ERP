@@ -200,13 +200,13 @@ Empfohlene Berechtigungen fuer das Repo:
 Non-interaktiv (kein `gh auth login` erforderlich):
 
 ```bash
-node /opt/ahlert-erp/scripts/github-repo-verify.mjs --apply --pr-test
+/opt/ahlert-erp/.tools/node/node-v20.20.0-linux-x64/bin/node /opt/ahlert-erp/scripts/github-repo-verify.mjs --apply --pr-test
 ```
 
 Optional als JSON-Ausgabe:
 
 ```bash
-node /opt/ahlert-erp/scripts/github-repo-verify.mjs --apply --pr-test --json
+/opt/ahlert-erp/.tools/node/node-v20.20.0-linux-x64/bin/node /opt/ahlert-erp/scripts/github-repo-verify.mjs --apply --pr-test --json
 ```
 
 Was dabei passiert:
