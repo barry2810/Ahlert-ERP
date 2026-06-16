@@ -79,6 +79,15 @@ function runGit(args, { cwd, extraEnv } = {}) {
   return execFileSync("git", args, { cwd, env, stdio: ["ignore", "pipe", "pipe"] }).toString("utf8").trim();
 }
 
+function getLocalMainSha() {
+  const repoPath = process.env.LOCAL_REPO_PATH || process.cwd();
+  try {
+    return runGit(["rev-parse", "origin/main"], { cwd: repoPath });
+  } catch {
+    return runGit(["rev-parse", "main"], { cwd: repoPath });
+  }
+}
+
 async function main() {
   const args = parseArgs(process.argv);
   const token = getToken();
@@ -92,7 +101,7 @@ async function main() {
     auth: null,
     repoInfo: null,
     settings: { applied: false, errors: [] },
-    branchProtection: { applied: false, errors: [], requiredCheckContexts: [] },
+    branchProtection: { supported: true, applied: false, errors: [], requiredCheckContexts: [] },
     prWorkflow: { executed: false, errors: [], prUrl: null, branch: null },
   };
 
@@ -125,13 +134,20 @@ async function main() {
     result.settings.applied = result.settings.errors.length === 0;
 
     const mainRef = result.repoInfo.default_branch || "main";
-    const commit = await ghApi({ token, method: "GET", url: `${apiBase}/commits/${encodeURIComponent(mainRef)}` });
-    const sha = commit?.sha;
-
-    const checkRuns = await bestEffort(
-      ghApi({ token, method: "GET", url: `${apiBase}/commits/${encodeURIComponent(sha)}/check-runs` }),
-      (e) => result.branchProtection.errors.push(String(e?.message || e)),
+    let sha = null;
+    const commit = await bestEffort(
+      ghApi({ token, method: "GET", url: `${apiBase}/commits/${encodeURIComponent(mainRef)}` }),
+      () => {},
     );
+    sha = commit?.sha || null;
+    if (!sha) sha = getLocalMainSha();
+
+    const checkRuns = sha
+      ? await bestEffort(
+          ghApi({ token, method: "GET", url: `${apiBase}/commits/${encodeURIComponent(sha)}/check-runs` }),
+          () => {},
+        )
+      : { check_runs: [] };
 
     const contexts = Array.isArray(checkRuns?.check_runs)
       ? uniq(checkRuns.check_runs.map((r) => r?.name)).filter((n) => typeof n === "string" && n.length > 0)
@@ -156,9 +172,17 @@ async function main() {
 
     await bestEffort(
       ghApi({ token, method: "PUT", url: `${apiBase}/branches/${encodeURIComponent(mainRef)}/protection`, body: protectionBody }),
-      (e) => result.branchProtection.errors.push(String(e?.message || e)),
+      (e) => {
+        const msg = String(e?.message || e);
+        if (msg.includes("Upgrade to GitHub Pro or make this repository public")) {
+          result.branchProtection.supported = false;
+          result.branchProtection.errors.push("Branch protection is unavailable for this private repository plan. Requires GitHub Pro or a public repository.");
+          return;
+        }
+        result.branchProtection.errors.push(msg);
+      },
     );
-    result.branchProtection.applied = result.branchProtection.errors.length === 0;
+    result.branchProtection.applied = result.branchProtection.supported && result.branchProtection.errors.length === 0;
 
     await bestEffort(
       ghApi({
@@ -186,6 +210,7 @@ async function main() {
     const gitSshCommand = `ssh -o BatchMode=yes -F ${sshConfig}`;
 
     const tmp = mkdtempSync(path.join(os.tmpdir(), "ahlert-erp-pr-test-"));
+    let pushedBranch = null;
     try {
       const remote = `git@github.com:${owner}/${repo}.git`;
       runGit(["clone", remote, tmp], { extraEnv: { GIT_SSH_COMMAND: gitSshCommand } });
@@ -208,6 +233,7 @@ async function main() {
       );
 
       runGit(["push", "-u", "origin", branch], { cwd: tmp, extraEnv: { GIT_SSH_COMMAND: gitSshCommand } });
+      pushedBranch = branch;
 
       const pr = await ghApi({
         token,
@@ -241,9 +267,20 @@ async function main() {
     } catch (e) {
       result.prWorkflow.errors.push(String(e?.message || e));
     } finally {
+      if (pushedBranch) {
+        try {
+          runGit(["push", "origin", "--delete", pushedBranch], { cwd: tmp, extraEnv: { GIT_SSH_COMMAND: gitSshCommand } });
+        } catch {
+          // Ignore remote cleanup failures; caller still gets the original verification error.
+        }
+      }
       rmSync(tmp, { recursive: true, force: true });
     }
   }
+
+  if (result.settings.errors.length > 0) result.ok = false;
+  if (result.branchProtection.supported && result.branchProtection.errors.length > 0) result.ok = false;
+  if (result.prWorkflow.errors.length > 0) result.ok = false;
 
   if (args.json) {
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
@@ -257,6 +294,7 @@ async function main() {
   lines.push(`repo_url: ${result.repoInfo?.url || "unknown"}`);
   if (args.apply) {
     lines.push(`settings_applied: ${result.settings.applied}`);
+    lines.push(`branch_protection_supported: ${result.branchProtection.supported}`);
     lines.push(`branch_protection_applied: ${result.branchProtection.applied}`);
     if (result.branchProtection.requiredCheckContexts.length > 0) lines.push(`required_checks: ${result.branchProtection.requiredCheckContexts.join(", ")}`);
     if (result.settings.errors.length > 0) lines.push(`settings_errors: ${result.settings.errors.join(" | ")}`);

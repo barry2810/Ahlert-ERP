@@ -33,6 +33,9 @@ GitHub-Status:
 - Public Key ist bei GitHub hinterlegt und SSH-Handshake ist erfolgreich (`Hi barry2810! ...`).
 - `main` wurde erfolgreich nach GitHub gepusht und ist auf dem Remote verfuegbar.
 - Neutrale GitHub-Testumgebung wurde erfolgreich durchlaufen: Clone, Test-Branch, Aenderung, Push und Rueckpruefung.
+- GitHub CLI `gh` ist authentifiziert und kann Repo-Metadaten per REST lesen.
+- Branch Protection ist fuer dieses private Repository per GitHub-Plan derzeit nicht verfuegbar (`Upgrade to GitHub Pro or make this repository public...`).
+- Der aktuell verwendete GitHub-CLI-Token erlaubt keine PR-Erstellung per API (`Resource not accessible by personal access token`).
 
 Bereits erfolgreich getestet:
 
@@ -237,6 +240,13 @@ Was dabei passiert:
   - PR wird geschlossen
   - Test-Branch wird wieder geloescht
 
+Wichtige Plattformgrenze:
+
+- Bei privaten Repositories kann GitHub Branch Protection je nach Tarif blockieren.
+- Typisches API-Signal:
+  - `Upgrade to GitHub Pro or make this repository public to enable this feature.`
+- Das Verifizierungs-Script erkennt diesen Fall und dokumentiert ihn als externen Plattform-Blocker statt als lokalen Konfigurationsfehler.
+
 ### 12.4 Manuelle Kurzchecks (ohne Script)
 
 Mit gesetztem `GH_TOKEN`:
@@ -253,6 +263,39 @@ Branch Protection anzeigen:
 PATH=/opt/ahlert-erp/.tools/bin:$PATH
 gh api repos/barry2810/Ahlert-ERP/branches/main/protection
 ```
+
+### 12.5 Tatsaechlich verifizierter Stand auf diesem System
+
+Erfolgreich verifiziert:
+
+- `gh auth status` zeigt einen aktiven Login fuer `barry2810`
+- REST-Zugriff auf Repo-Metadaten funktioniert
+- Repo-Settings konnten per API angepasst bzw. bestaetigt werden:
+  - `delete_branch_on_merge=true`
+  - `allow_squash_merge=true`
+  - `allow_merge_commit=false`
+  - `allow_rebase_merge=true`
+- SSH-basierter Git-Workflow gegen GitHub funktioniert weiterhin fuer Clone/Pull/Push
+
+Extern blockiert:
+
+- Branch Protection fuer `main`:
+  - GitHub meldet `Upgrade to GitHub Pro or make this repository public to enable this feature.`
+  - Das ist kein lokaler Konfigurationsfehler, sondern eine Tarif-/Plattformgrenze.
+- PR-Erstellung per GitHub-CLI/API:
+  - GitHub meldet `Resource not accessible by personal access token`
+  - Ursache ist ein zu eingeschraenkter Token fuer Pull-Request-Operationen.
+
+Empfohlene Abhilfe:
+
+- Fuer Branch Protection:
+  - GitHub Pro aktivieren oder Repository oeffentlich machen
+- Fuer vollautomatische PR-Workflow-Verifizierung:
+  - Fine-grained PAT mit mindestens folgenden Repo-Rechten verwenden:
+    - `Pull requests: Read and write`
+    - `Contents: Read and write`
+    - `Actions: Read`
+    - `Administration: Read and write` (wenn Branch Protection gesetzt werden soll)
 
 ### 2.3 Remote-Repository erstellen
 
