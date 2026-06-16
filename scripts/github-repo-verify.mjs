@@ -12,10 +12,19 @@ function parseArgs(argv) {
   };
 }
 
-function requireEnv(name) {
-  const v = process.env[name];
-  if (!v) throw new Error(`${name} is required`);
-  return v;
+function getToken() {
+  const v = (process.env.GH_TOKEN || "").trim();
+  if (v) return v;
+  const ghPath = process.env.GH_BIN || "/opt/ahlert-erp/.tools/bin/gh";
+  try {
+    const token = execFileSync(ghPath, ["auth", "token"], { stdio: ["ignore", "pipe", "pipe"] })
+      .toString("utf8")
+      .trim();
+    if (!token) throw new Error("empty token");
+    return token;
+  } catch (e) {
+    throw new Error("GH_TOKEN is required (or run `gh auth login` so `gh auth token` works)");
+  }
 }
 
 function parseRepo(value) {
@@ -72,7 +81,7 @@ function runGit(args, { cwd, extraEnv } = {}) {
 
 async function main() {
   const args = parseArgs(process.argv);
-  const token = requireEnv("GH_TOKEN");
+  const token = getToken();
   const repoValue = process.env.REPO || "barry2810/Ahlert-ERP";
   const { owner, repo } = parseRepo(repoValue);
   const apiBase = `https://api.github.com/repos/${owner}/${repo}`;
@@ -265,4 +274,3 @@ main().catch((e) => {
   process.stderr.write(`${String(e?.message || e)}\n`);
   process.exitCode = 1;
 });
-

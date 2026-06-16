@@ -203,6 +203,17 @@ Non-interaktiv (kein `gh auth login` erforderlich):
 /opt/ahlert-erp/.tools/node/node-v20.20.0-linux-x64/bin/node /opt/ahlert-erp/scripts/github-repo-verify.mjs --apply --pr-test
 ```
 
+Alternative ohne `GH_TOKEN` (wenn du keinen Token als Environment Variable setzen willst):
+
+- Einmalig interaktiv anmelden:
+
+```bash
+PATH=/opt/ahlert-erp/.tools/bin:$PATH
+gh auth login
+```
+
+- Danach kann das Script ohne `GH_TOKEN` laufen, da es den Token intern ueber `gh auth token` bezieht.
+
 Optional als JSON-Ausgabe:
 
 ```bash
