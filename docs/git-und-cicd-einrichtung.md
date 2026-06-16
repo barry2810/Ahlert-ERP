@@ -31,6 +31,14 @@ Noch externer Blocker:
 - Der erzeugte Public Key ist noch nicht bei GitHub hinterlegt.
 - Deshalb schlagen SSH-Authentifizierung, `git ls-remote origin`, Clone/Pull/Push und das Erstellen oder Bestaetigen eines GitHub-Repositorys aktuell noch mit `Permission denied (publickey)` fehl.
 
+Bereits erfolgreich getestet:
+
+- Root-Commit lokal erstellt: `168a9ce` (`chore: initialize repository and local git workflow`)
+- Neutrale lokale Testkopie via `git clone /opt/ahlert-erp /tmp/ahlert-erp-local-clone`
+- Test-Branch lokal erstellt und gepusht: `test/local-e2e`
+- Lokaler Push-Nachweis gegen das initialisierte Repository erfolgreich
+- `act`-Workflow in neutraler Testkopie erfolgreich: Checkout, Node-Setup, `npm install`, OpenAPI-Build und OpenAPI-Validierung
+
 Der aktuelle Projektstand wurde auf dem Zielsystem bereits teilweise verifiziert:
 
 - Arbeitsverzeichnis: `/opt/ahlert-erp`
