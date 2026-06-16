@@ -261,6 +261,14 @@ const Permissions = {
   TrainingSensitiveView: "TRAINING_SENSITIVE_VIEW",
   TrainingSensitiveAdmin: "TRAINING_SENSITIVE_ADMIN",
   TrainingExport: "TRAINING_EXPORT",
+  ApprovalView: "APPROVAL_VIEW",
+  ApprovalRequest: "APPROVAL_REQUEST",
+  ApprovalApprovePricingL1: "APPROVAL_APPROVE_PRICING_L1",
+  ApprovalApprovePricingL2: "APPROVAL_APPROVE_PRICING_L2",
+  ApprovalApproveBilling: "APPROVAL_APPROVE_BILLING",
+  ApprovalApproveMasterdata: "APPROVAL_APPROVE_MASTERDATA",
+  ApprovalApproveRouteOverrideL1: "APPROVAL_APPROVE_ROUTE_OVERRIDE_L1",
+  ApprovalApproveRouteOverrideL2: "APPROVAL_APPROVE_ROUTE_OVERRIDE_L2",
 };
 
 const allowInsecureHeaders = process.env.ERP_ALLOW_INSECURE_HEADERS === "true";
@@ -2733,6 +2741,726 @@ async function insertAuditLog(event) {
       event.meta || {},
     ],
   );
+}
+
+async function insertApprovalAuditLog(entry) {
+  if (!pool) return;
+  await pool.query(
+    `
+    insert into erp_approval_audit
+      (id, request_id, entity_type, entity_id, event_type, username, occurred_at, reason, meta)
+    values
+      ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb);
+    `,
+    [
+      entry.id,
+      entry.requestId || null,
+      entry.entityType,
+      entry.entityId || null,
+      entry.eventType,
+      entry.username,
+      entry.occurredAt,
+      entry.reason || null,
+      JSON.stringify(entry.meta || {}),
+    ],
+  );
+}
+
+function normalizeApprovalRequestType(value) {
+  const v = normalizeString(value);
+  return v ? v.toUpperCase().replace(/[^A-Z0-9_]+/g, "_") : null;
+}
+
+function normalizeApprovalRequestSubtype(value) {
+  const v = normalizeString(value);
+  return v ? v.toLowerCase().replace(/[^a-z0-9_]+/g, "_") : null;
+}
+
+function approvalPolicyFor({ requestType, requestSubtype, payload }) {
+  const t = normalizeApprovalRequestType(requestType);
+  const s = normalizeApprovalRequestSubtype(requestSubtype);
+  const p = payload && typeof payload === "object" ? payload : {};
+
+  if (t === "PRICING_CHANGE") {
+    const b = p.body && typeof p.body === "object" ? p.body : {};
+    const unitPriceCents = Number.isFinite(Number(b.unitPriceCents)) ? Math.abs(Math.round(Number(b.unitPriceCents))) : 0;
+    const valueCents = Number.isFinite(Number(b.valueCents)) ? Math.abs(Math.round(Number(b.valueCents))) : 0;
+    const valuePct = Number.isFinite(Number(b.valuePct)) ? Math.abs(Number(b.valuePct)) : 0;
+    const magnitude = Math.max(unitPriceCents, valueCents, Math.round(valuePct * 100));
+    const needsL2 = magnitude >= 20_000 || valuePct >= 10;
+
+    const steps = needsL2
+      ? [
+          { stepNo: 1, requiredPermission: Permissions.ApprovalApprovePricingL1, escalationPermission: Permissions.ApprovalApprovePricingL2, slaMinutes: 120 },
+          { stepNo: 2, requiredPermission: Permissions.ApprovalApprovePricingL2, escalationPermission: Permissions.FleetAdmin, slaMinutes: 240 },
+        ]
+      : [{ stepNo: 1, requiredPermission: Permissions.ApprovalApprovePricingL1, escalationPermission: Permissions.ApprovalApprovePricingL2, slaMinutes: 240 }];
+    return { steps, requestedSlaMinutes: steps[0]?.slaMinutes || 240, meta: { magnitude, needsL2, policy: "pricing_v1" } };
+  }
+
+  if (t === "BILLING_APPROVAL") {
+    const steps = [{ stepNo: 1, requiredPermission: Permissions.ApprovalApproveBilling, escalationPermission: Permissions.FleetAdmin, slaMinutes: 120 }];
+    return { steps, requestedSlaMinutes: 120, meta: { policy: "billing_v1" } };
+  }
+
+  if (t === "ROUTE_OVERRIDE") {
+    const m = p.meta && typeof p.meta === "object" ? p.meta : {};
+    const elevated = m.overrideRequirement === "elevated" || m.hardBlocksPresent === true || m.requiresHard === true;
+    const steps = elevated
+      ? [
+          { stepNo: 1, requiredPermission: Permissions.ApprovalApproveRouteOverrideL1, escalationPermission: Permissions.ApprovalApproveRouteOverrideL2, slaMinutes: 30 },
+          { stepNo: 2, requiredPermission: Permissions.ApprovalApproveRouteOverrideL2, escalationPermission: Permissions.FleetAdmin, slaMinutes: 60 },
+        ]
+      : [{ stepNo: 1, requiredPermission: Permissions.ApprovalApproveRouteOverrideL1, escalationPermission: Permissions.ApprovalApproveRouteOverrideL2, slaMinutes: 60 }];
+    return { steps, requestedSlaMinutes: steps[0]?.slaMinutes || 60, meta: { elevated, policy: "route_override_v1" } };
+  }
+
+  if (t === "MASTERDATA_CHANGE") {
+    const steps = [{ stepNo: 1, requiredPermission: Permissions.ApprovalApproveMasterdata, escalationPermission: Permissions.FleetAdmin, slaMinutes: 240 }];
+    return { steps, requestedSlaMinutes: 240, meta: { policy: "masterdata_v1", subtype: s || null } };
+  }
+
+  const steps = [{ stepNo: 1, requiredPermission: Permissions.FleetAdmin, escalationPermission: Permissions.FleetAdmin, slaMinutes: 240 }];
+  return { steps, requestedSlaMinutes: 240, meta: { policy: "fallback_admin" } };
+}
+
+async function getApprovalRequestById(id) {
+  if (!pool) return null;
+  const rid = normalizeString(id);
+  if (!rid) return null;
+  const r = await pool
+    .query(
+      `
+      select id, request_type, request_subtype, status, requested_by, requested_at, reason, payload, due_at, escalated_at, rejected_at, rejected_by, applied_at, applied_by, meta
+      from erp_approval_request
+      where id = $1
+      limit 1;
+      `,
+      [rid],
+    )
+    .then((x) => x.rows[0] || null)
+    .catch(() => null);
+  if (!r) return null;
+  const steps = await pool
+    .query(
+      `
+      select id, step_no, required_permission, escalation_permission, status, decided_at, decided_by, decision_reason, created_at
+      from erp_approval_step
+      where request_id = $1
+      order by step_no asc;
+      `,
+      [rid],
+    )
+    .then((x) => x.rows)
+    .catch(() => []);
+  return {
+    id: r.id,
+    requestType: r.request_type,
+    requestSubtype: r.request_subtype || null,
+    status: r.status,
+    requestedBy: r.requested_by,
+    requestedAt: new Date(r.requested_at).toISOString(),
+    reason: r.reason || null,
+    payload: r.payload || {},
+    dueAt: r.due_at ? new Date(r.due_at).toISOString() : null,
+    escalatedAt: r.escalated_at ? new Date(r.escalated_at).toISOString() : null,
+    rejectedAt: r.rejected_at ? new Date(r.rejected_at).toISOString() : null,
+    rejectedBy: r.rejected_by || null,
+    appliedAt: r.applied_at ? new Date(r.applied_at).toISOString() : null,
+    appliedBy: r.applied_by || null,
+    meta: r.meta || {},
+    steps: steps.map((s) => ({
+      id: s.id,
+      stepNo: Number(s.step_no),
+      requiredPermission: s.required_permission,
+      escalationPermission: s.escalation_permission || null,
+      status: s.status,
+      decidedAt: s.decided_at ? new Date(s.decided_at).toISOString() : null,
+      decidedBy: s.decided_by || null,
+      decisionReason: s.decision_reason || null,
+      createdAt: new Date(s.created_at).toISOString(),
+    })),
+  };
+}
+
+async function listApprovalRequests({ status = null, requestType = null, limit = 50 } = {}) {
+  if (!pool) return [];
+  const st = normalizeString(status) || null;
+  const t = normalizeApprovalRequestType(requestType) || null;
+  const n = Math.max(1, Math.min(200, Number(limit) || 50));
+  const rows = await pool
+    .query(
+      `
+      select id, request_type, request_subtype, status, requested_by, requested_at, reason, due_at, escalated_at, rejected_at, rejected_by, applied_at, applied_by
+      from erp_approval_request
+      where ($1::text is null or status = $1)
+        and ($2::text is null or request_type = $2)
+      order by requested_at desc
+      limit $3;
+      `,
+      [st, t, n],
+    )
+    .then((r) => r.rows)
+    .catch(() => []);
+  return rows.map((r) => ({
+    id: r.id,
+    requestType: r.request_type,
+    requestSubtype: r.request_subtype || null,
+    status: r.status,
+    requestedBy: r.requested_by,
+    requestedAt: new Date(r.requested_at).toISOString(),
+    reason: r.reason || null,
+    dueAt: r.due_at ? new Date(r.due_at).toISOString() : null,
+    escalatedAt: r.escalated_at ? new Date(r.escalated_at).toISOString() : null,
+    rejectedAt: r.rejected_at ? new Date(r.rejected_at).toISOString() : null,
+    rejectedBy: r.rejected_by || null,
+    appliedAt: r.applied_at ? new Date(r.applied_at).toISOString() : null,
+    appliedBy: r.applied_by || null,
+  }));
+}
+
+async function createApprovalRequest({ requestType, requestSubtype, requestedBy, reason, payload, meta }) {
+  if (!pool) return { ok: false, error: "db_required" };
+  const t = normalizeApprovalRequestType(requestType);
+  if (!t) return { ok: false, error: "invalid_request_type" };
+  const s = normalizeApprovalRequestSubtype(requestSubtype);
+  const u = normalizeString(requestedBy);
+  if (!u) return { ok: false, error: "requestedBy_required" };
+
+  const policy = approvalPolicyFor({ requestType: t, requestSubtype: s, payload });
+  const id = `apr_${crypto.randomUUID().slice(0, 12)}`;
+  const now = new Date();
+  const dueAt = new Date(now.getTime() + Math.max(1, Number(policy.requestedSlaMinutes) || 240) * 60_000);
+
+  await pool.query(
+    `
+    insert into erp_approval_request
+      (id, request_type, request_subtype, status, requested_by, requested_at, reason, payload, due_at, meta)
+    values
+      ($1,$2,$3,'pending',$4,$5,$6,$7::jsonb,$8,$9::jsonb);
+    `,
+    [id, t, s, u, now.toISOString(), reason || null, JSON.stringify(payload || {}), dueAt.toISOString(), JSON.stringify({ ...(meta || {}), ...(policy.meta || {}) })],
+  );
+
+  for (const step of policy.steps || []) {
+    const sid = `ast_${crypto.randomUUID().slice(0, 12)}`;
+    await pool.query(
+      `
+      insert into erp_approval_step
+        (id, request_id, step_no, required_permission, escalation_permission, status, created_at)
+      values
+        ($1,$2,$3,$4,$5,'pending',$6);
+      `,
+      [sid, id, Number(step.stepNo) || 1, step.requiredPermission, step.escalationPermission || null, now.toISOString()],
+    );
+  }
+
+  await insertApprovalAuditLog({
+    id: `aal_${crypto.randomUUID().slice(0, 12)}`,
+    requestId: id,
+    entityType: "approval_request",
+    entityId: id,
+    eventType: "APPROVAL_REQUESTED",
+    username: u,
+    occurredAt: now.toISOString(),
+    reason: reason || null,
+    meta: { requestType: t, requestSubtype: s || null },
+  });
+
+  await publishErpEvent({
+    eventType: "APPROVAL_REQUESTED",
+    aggregateType: "approval_request",
+    aggregateId: id,
+    occurredAt: now.toISOString(),
+    createdBy: u,
+    payload: { requestType: t, requestSubtype: s || null, dueAt: dueAt.toISOString() },
+  });
+  const firstStep = (policy.steps || [])[0] || null;
+  if (firstStep && firstStep.requiredPermission) {
+    await publishErpEvent({
+      eventType: "EMAIL_NOTIFICATION_REQUESTED",
+      aggregateType: "approval_request",
+      aggregateId: id,
+      occurredAt: now.toISOString(),
+      createdBy: "system",
+      payload: {
+        template: "approval_requested",
+        toPermission: firstStep.requiredPermission,
+        requestId: id,
+        requestType: t,
+        requestSubtype: s || null,
+        dueAt: dueAt.toISOString(),
+      },
+    });
+  }
+  publishEvent("approval", "APPROVAL_REQUESTED", { requestId: id, requestType: t, requestSubtype: s || null, dueAt: dueAt.toISOString() });
+
+  const item = await getApprovalRequestById(id);
+  return { ok: true, item };
+}
+
+async function decideApprovalRequest({ requestId, decision, auth, reason }) {
+  if (!pool) return { ok: false, error: "db_required" };
+  const rid = normalizeString(requestId);
+  const u = normalizeString(auth && auth.username);
+  const d = normalizeString(decision);
+  const why = normalizeString(reason) || null;
+  if (!rid) return { ok: false, error: "requestId_required" };
+  if (!u) return { ok: false, error: "decidedBy_required" };
+  if (!["approve", "reject"].includes(d)) return { ok: false, error: "invalid_decision" };
+
+  const reqRow = await pool
+    .query(
+      `select id, request_type, request_subtype, status, requested_by, payload from erp_approval_request where id = $1 limit 1;`,
+      [rid],
+    )
+    .then((r) => r.rows[0] || null)
+    .catch(() => null);
+  if (!reqRow) return { ok: false, error: "request_not_found" };
+  if (reqRow.status !== "pending") return { ok: false, error: "request_not_pending" };
+  if (normalizeString(reqRow.requested_by) === u) return { ok: false, error: "cannot_approve_own_request" };
+
+  const step = await pool
+    .query(
+      `
+      select id, step_no, required_permission, escalation_permission, status
+      from erp_approval_step
+      where request_id = $1 and status in ('pending','escalated')
+      order by step_no asc
+      limit 1;
+      `,
+      [rid],
+    )
+    .then((r) => r.rows[0] || null)
+    .catch(() => null);
+  if (!step) return { ok: false, error: "no_pending_step" };
+  const can = auth && (auth.permissions.has(step.required_permission) || auth.permissions.has(Permissions.FleetAdmin));
+  if (!can) return { ok: false, error: "forbidden" };
+
+  await pool.query(
+    `
+    update erp_approval_step
+    set status = $2, decided_at = $3, decided_by = $4, decision_reason = $5
+    where id = $1;
+    `,
+    [step.id, d === "approve" ? "approved" : "rejected", new Date().toISOString(), u, why],
+  );
+
+  const now = new Date();
+
+  if (d === "reject") {
+    await pool.query(
+      `
+      update erp_approval_request
+      set status = 'rejected', rejected_at = $2, rejected_by = $3, due_at = null
+      where id = $1;
+      `,
+      [rid, now.toISOString(), u],
+    );
+
+    await insertApprovalAuditLog({
+      id: `aal_${crypto.randomUUID().slice(0, 12)}`,
+      requestId: rid,
+      entityType: "approval_request",
+      entityId: rid,
+      eventType: "APPROVAL_REJECTED",
+      username: u,
+      occurredAt: now.toISOString(),
+      reason: why,
+      meta: { stepNo: Number(step.step_no) },
+    });
+    await publishErpEvent({
+      eventType: "APPROVAL_REJECTED",
+      aggregateType: "approval_request",
+      aggregateId: rid,
+      occurredAt: now.toISOString(),
+      createdBy: u,
+      payload: { stepNo: Number(step.step_no), reason: why },
+    });
+    publishEvent("approval", "APPROVAL_REJECTED", { requestId: rid, stepNo: Number(step.step_no), reason: why });
+
+    return { ok: true, item: await getApprovalRequestById(rid) };
+  }
+
+  const next = await pool
+    .query(
+      `
+      select id, step_no, required_permission, escalation_permission, status
+      from erp_approval_step
+      where request_id = $1 and status in ('pending','escalated')
+      order by step_no asc
+      limit 1;
+      `,
+      [rid],
+    )
+    .then((r) => r.rows[0] || null)
+    .catch(() => null);
+
+  if (next) {
+    const policy = approvalPolicyFor({ requestType: reqRow.request_type, requestSubtype: reqRow.request_subtype, payload: reqRow.payload || {} });
+    const stepPolicy = (policy.steps || []).find((x) => Number(x.stepNo) === Number(next.step_no)) || null;
+    const sla = stepPolicy ? Math.max(1, Number(stepPolicy.slaMinutes) || 240) : 240;
+    const dueAt = new Date(now.getTime() + sla * 60_000);
+    await pool.query(`update erp_approval_request set due_at = $2 where id = $1;`, [rid, dueAt.toISOString()]);
+
+    await insertApprovalAuditLog({
+      id: `aal_${crypto.randomUUID().slice(0, 12)}`,
+      requestId: rid,
+      entityType: "approval_request",
+      entityId: rid,
+      eventType: "APPROVAL_STEP_APPROVED",
+      username: u,
+      occurredAt: now.toISOString(),
+      reason: why,
+      meta: { stepNo: Number(step.step_no), nextStepNo: Number(next.step_no), dueAt: dueAt.toISOString() },
+    });
+    await publishErpEvent({
+      eventType: "APPROVAL_STEP_APPROVED",
+      aggregateType: "approval_request",
+      aggregateId: rid,
+      occurredAt: now.toISOString(),
+      createdBy: u,
+      payload: { stepNo: Number(step.step_no), nextStepNo: Number(next.step_no), dueAt: dueAt.toISOString() },
+    });
+    publishEvent("approval", "APPROVAL_STEP_APPROVED", { requestId: rid, stepNo: Number(step.step_no), nextStepNo: Number(next.step_no), dueAt: dueAt.toISOString() });
+
+    return { ok: true, item: await getApprovalRequestById(rid) };
+  }
+
+  await pool.query(`update erp_approval_request set status = 'approved', due_at = null where id = $1;`, [rid]);
+  await insertApprovalAuditLog({
+    id: `aal_${crypto.randomUUID().slice(0, 12)}`,
+    requestId: rid,
+    entityType: "approval_request",
+    entityId: rid,
+    eventType: "APPROVAL_APPROVED",
+    username: u,
+    occurredAt: now.toISOString(),
+    reason: why,
+    meta: { finalStepNo: Number(step.step_no) },
+  });
+
+  const applyRes = await applyApprovalRequest({ requestId: rid, appliedBy: u });
+  if (!applyRes.ok) return applyRes;
+  return { ok: true, item: await getApprovalRequestById(rid), applied: applyRes.applied };
+}
+
+async function applyApprovalRequest({ requestId, appliedBy }) {
+  if (!pool) return { ok: false, error: "db_required" };
+  const rid = normalizeString(requestId);
+  const u = normalizeString(appliedBy);
+  if (!rid) return { ok: false, error: "requestId_required" };
+  if (!u) return { ok: false, error: "appliedBy_required" };
+
+  const reqRow = await pool
+    .query(
+      `select id, request_type, request_subtype, status, requested_by, payload from erp_approval_request where id = $1 limit 1;`,
+      [rid],
+    )
+    .then((r) => r.rows[0] || null)
+    .catch(() => null);
+  if (!reqRow) return { ok: false, error: "request_not_found" };
+  if (!["approved", "applied"].includes(reqRow.status)) return { ok: false, error: "request_not_approved" };
+  if (reqRow.status === "applied") return { ok: true, applied: { alreadyApplied: true } };
+
+  const requestedBy = normalizeString(reqRow.requested_by);
+  const payload = reqRow.payload && typeof reqRow.payload === "object" ? reqRow.payload : {};
+
+  let applied = null;
+  if (reqRow.request_type === "PRICING_CHANGE") {
+    const kind = normalizeApprovalRequestSubtype(reqRow.request_subtype) || "unknown";
+    if (kind === "pricelist_create") {
+      applied = await createPriceList({ body: payload.body || {}, username: requestedBy });
+    } else if (kind === "pricelist_item_create") {
+      applied = await createPriceListItem({ body: payload.body || {}, username: requestedBy });
+    } else if (kind === "fee_create") {
+      applied = await createFee({ body: payload.body || {}, username: requestedBy });
+    } else if (kind === "override_create") {
+      applied = await createCustomerOverride({ body: payload.body || {}, username: requestedBy });
+    } else {
+      return { ok: false, error: "unknown_pricing_action" };
+    }
+  } else if (reqRow.request_type === "MASTERDATA_CHANGE") {
+    const kind = normalizeApprovalRequestSubtype(reqRow.request_subtype) || "unknown";
+    if (kind === "customer_create") {
+      applied = await createCustomer({ body: payload.body || {}, username: requestedBy });
+    } else if (kind === "customer_update") {
+      applied = await updateCustomer({ body: payload.body || {}, username: requestedBy });
+    } else if (kind === "contract_create") {
+      applied = await createContract({ body: payload.body || {}, username: requestedBy });
+    } else if (kind === "contract_status") {
+      applied = await setContractStatus({ contractId: payload.contractId, toStatus: payload.toStatus, username: requestedBy, reason: payload.reason || null });
+    } else if (kind === "material_create") {
+      applied = await createMaterial({ body: payload.body || {}, username: requestedBy });
+    } else {
+      return { ok: false, error: "unknown_masterdata_action" };
+    }
+  } else if (reqRow.request_type === "BILLING_APPROVAL") {
+    const kind = normalizeApprovalRequestSubtype(reqRow.request_subtype) || "unknown";
+    if (kind === "invoice_from_pricing") {
+      applied = await createInvoiceDraftFromPricing({ orderId: payload.orderId, pricingCalculationId: payload.pricingCalculationId || null, username: requestedBy });
+    } else if (kind === "invoice_mock") {
+      applied = await createMockInvoiceDraft({ orderId: payload.orderId, currency: payload.currency || "EUR", lines: payload.lines || [], username: requestedBy });
+    } else {
+      return { ok: false, error: "unknown_billing_action" };
+    }
+  } else if (reqRow.request_type === "ROUTE_OVERRIDE") {
+    applied = await applyDispatchDecisionOverrideFromApproval({ payload, requestedBy, appliedBy: u, approvalRequestId: rid });
+  } else {
+    return { ok: false, error: "unknown_request_type" };
+  }
+
+  if (!applied || applied.ok === false) return { ok: false, error: applied?.error || "apply_failed", applied };
+
+  const now = new Date().toISOString();
+  await pool.query(
+    `
+    update erp_approval_request
+    set status = 'applied', applied_at = $2, applied_by = $3
+    where id = $1;
+    `,
+    [rid, now, u],
+  );
+  await insertApprovalAuditLog({
+    id: `aal_${crypto.randomUUID().slice(0, 12)}`,
+    requestId: rid,
+    entityType: "approval_request",
+    entityId: rid,
+    eventType: "APPROVAL_APPLIED",
+    username: u,
+    occurredAt: now,
+    reason: null,
+    meta: { requestType: reqRow.request_type, requestSubtype: reqRow.request_subtype || null },
+  });
+  await publishErpEvent({
+    eventType: "APPROVAL_APPLIED",
+    aggregateType: "approval_request",
+    aggregateId: rid,
+    occurredAt: now,
+    createdBy: u,
+    payload: { requestType: reqRow.request_type, requestSubtype: reqRow.request_subtype || null },
+  });
+  publishEvent("approval", "APPROVAL_APPLIED", { requestId: rid, requestType: reqRow.request_type, requestSubtype: reqRow.request_subtype || null });
+  return { ok: true, applied };
+}
+
+async function applyDispatchDecisionOverrideFromApproval({ payload, requestedBy, appliedBy, approvalRequestId }) {
+  if (!pool) return { ok: false, error: "db_required" };
+  const body = payload && typeof payload === "object" ? payload.body : null;
+  if (!body || typeof body !== "object") return { ok: false, error: "invalid_payload" };
+
+  const vehicleId = normalizeString(body.vehicleId);
+  const moduleKey = normalizeString(body.module);
+  const windowStart = parseIsoDate(body.windowStart);
+  const windowEnd = parseIsoDate(body.windowEnd);
+  const decision = normalizeString(body.decision);
+  const reason = normalizeString(body.reason);
+  const expiresAt = body.expiresAt ? parseIsoDate(body.expiresAt) : null;
+  const ctxSource = body.context && typeof body.context === "object" ? body.context : body;
+  const ctx = {
+    routeId: normalizeString(ctxSource.routeId),
+    orderId: normalizeString(ctxSource.orderId),
+    customerId: normalizeString(ctxSource.customerId),
+    plannedTons: normalizeString(ctxSource.plannedTons),
+    driverId: normalizeString(ctxSource.driverId),
+    siteDepot: normalizeString(ctxSource.siteDepot),
+    siteLat: ctxSource.siteLat === null || ctxSource.siteLat === undefined || ctxSource.siteLat === "" ? null : Number(ctxSource.siteLat),
+    siteLon: ctxSource.siteLon === null || ctxSource.siteLon === undefined || ctxSource.siteLon === "" ? null : Number(ctxSource.siteLon),
+    maxDistanceKm: ctxSource.maxDistanceKm === null || ctxSource.maxDistanceKm === undefined || ctxSource.maxDistanceKm === "" ? null : Number(ctxSource.maxDistanceKm),
+    weighRequired: Boolean(ctxSource.weighRequired),
+    tankRequired: Boolean(ctxSource.tankRequired),
+    depotCandidates: Array.isArray(ctxSource.depotCandidates) ? ctxSource.depotCandidates : parseCsv(ctxSource.depotCandidates),
+    priorityUrgency: normalizeString(ctxSource.priorityUrgency),
+    priorityValue: normalizeString(ctxSource.priorityValue),
+    priorityCustomerTier: normalizeString(ctxSource.priorityCustomerTier),
+    containerSize: normalizeString(ctxSource.containerSize),
+    containerType: normalizeString(ctxSource.containerType),
+    grapplerType: normalizeString(ctxSource.grapplerType),
+    adrClass: normalizeString(ctxSource.adrClass),
+    shiftStart: normalizeString(ctxSource.shiftStart),
+    shiftEnd: normalizeString(ctxSource.shiftEnd),
+    lastShiftEnd: normalizeString(ctxSource.lastShiftEnd),
+    minRestMinutes: normalizeString(ctxSource.minRestMinutes),
+    plannedWorkMinutes: normalizeString(ctxSource.plannedWorkMinutes),
+    maxWorkMinutes: normalizeString(ctxSource.maxWorkMinutes),
+    loadMinutes: normalizeString(ctxSource.loadMinutes),
+    unloadMinutes: normalizeString(ctxSource.unloadMinutes),
+    transitMinutes: normalizeString(ctxSource.transitMinutes),
+  };
+
+  if (!vehicleId || !moduleKey || !windowStart || !windowEnd || windowEnd <= windowStart) return { ok: false, error: "invalid_request" };
+  if (moduleKey !== "waste") return { ok: false, error: "module_must_be_waste" };
+  if (!["allow", "deny"].includes(decision)) return { ok: false, error: "invalid_decision" };
+  if (!reason) return { ok: false, error: "reason_required" };
+  if ((ctx.siteLat !== null && !Number.isFinite(ctx.siteLat)) || (ctx.siteLon !== null && !Number.isFinite(ctx.siteLon))) return { ok: false, error: "invalid_site_coordinates" };
+  if (ctx.maxDistanceKm !== null && !Number.isFinite(ctx.maxDistanceKm)) return { ok: false, error: "invalid_maxDistanceKm" };
+
+  const vehicle = await getVehicleById(vehicleId);
+  if (!vehicle) return { ok: false, error: "vehicle_not_found" };
+
+  const evalResult = await evaluateDispatchDecision({ vehicle, moduleKey, windowStart, windowEnd, context: ctx });
+  const hardPresent = evalResult.hardBlocks.length > 0;
+
+  const id = `dovr_${crypto.randomUUID().slice(0, 12)}`;
+  const createdAt = new Date().toISOString();
+
+  await pool.query(
+    `
+    insert into fleet_dispatch_override
+      (id, vehicle_id, module, window_start, window_end, decision, reason, username, expires_at, created_at)
+    values
+      ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10);
+    `,
+    [
+      id,
+      vehicleId,
+      moduleKey,
+      windowStart.toISOString(),
+      windowEnd.toISOString(),
+      decision,
+      reason,
+      requestedBy,
+      expiresAt ? expiresAt.toISOString() : null,
+      createdAt,
+    ],
+  );
+
+  await insertAuditLog({
+    id: `al_${crypto.randomUUID()}`,
+    eventType: "DISPATCH_DECISION_OVERRIDDEN",
+    username: requestedBy,
+    occurredAt: createdAt,
+    lockType: hardPresent ? "hard" : evalResult.softBlocks.length ? "soft" : null,
+    blockId: null,
+    vehicleId,
+    blockReason: null,
+    overrideId: id,
+    overrideReason: reason,
+    meta: {
+      approvalRequestId: approvalRequestId || null,
+      appliedBy,
+      endpoint: "/api/fleet/dispatch/decision",
+      method: "POST",
+      module: moduleKey,
+      windowStart: windowStart.toISOString(),
+      windowEnd: windowEnd.toISOString(),
+      baseDecision: evalResult.baseDecision,
+      decision,
+      reasonCode: "manual_override",
+      expiresAt: expiresAt ? expiresAt.toISOString() : null,
+      overrideRequirement: evalResult.overrideRequirement,
+      criteria: evalResult.criteria,
+      reasons: evalResult.reasons,
+      warnings: evalResult.warnings,
+    },
+  });
+
+  return {
+    ok: true,
+    item: {
+      id,
+      vehicleId,
+      module: moduleKey,
+      windowStart: windowStart.toISOString(),
+      windowEnd: windowEnd.toISOString(),
+      decision,
+      reason,
+      username: requestedBy,
+      expiresAt: expiresAt ? expiresAt.toISOString() : null,
+      createdAt,
+    },
+    baseDecision: evalResult.baseDecision,
+    hardBlocks: evalResult.hardBlocks.map((b) => ({ id: b.id, reason: b.reason, lockType: b.lockType })),
+    softBlocks: evalResult.softBlocks.map((b) => ({ id: b.id, reason: b.reason, lockType: b.lockType })),
+  };
+}
+
+async function tickApprovalEscalations() {
+  if (!pool) return { ok: true, escalated: 0 };
+  const now = new Date();
+  const rows = await pool
+    .query(
+      `
+      select id
+      from erp_approval_request
+      where status = 'pending'
+        and due_at is not null
+        and due_at <= $1
+      order by due_at asc
+      limit 50;
+      `,
+      [now.toISOString()],
+    )
+    .then((r) => r.rows)
+    .catch(() => []);
+  let escalated = 0;
+  for (const r of rows) {
+    const rid = r.id;
+    const step = await pool
+      .query(
+        `
+        select id, step_no, required_permission, escalation_permission, status
+        from erp_approval_step
+        where request_id = $1 and status in ('pending','escalated')
+        order by step_no asc
+        limit 1;
+        `,
+        [rid],
+      )
+      .then((x) => x.rows[0] || null)
+      .catch(() => null);
+    if (!step) continue;
+    const escPerm = normalizeString(step.escalation_permission) || Permissions.FleetAdmin;
+    const oldPerm = normalizeString(step.required_permission);
+    if (!escPerm || escPerm === oldPerm) continue;
+
+    const nextDue = new Date(now.getTime() + 60 * 60_000);
+    await pool.query(
+      `
+      update erp_approval_step
+      set required_permission = $2, status = 'escalated'
+      where id = $1;
+      `,
+      [step.id, escPerm],
+    );
+    await pool.query(`update erp_approval_request set escalated_at = $2, due_at = $3 where id = $1;`, [rid, now.toISOString(), nextDue.toISOString()]);
+    await insertApprovalAuditLog({
+      id: `aal_${crypto.randomUUID().slice(0, 12)}`,
+      requestId: rid,
+      entityType: "approval_request",
+      entityId: rid,
+      eventType: "APPROVAL_ESCALATED",
+      username: "system",
+      occurredAt: now.toISOString(),
+      reason: null,
+      meta: { stepNo: Number(step.step_no), fromPermission: oldPerm, toPermission: escPerm, dueAt: nextDue.toISOString() },
+    });
+    await publishErpEvent({
+      eventType: "APPROVAL_ESCALATED",
+      aggregateType: "approval_request",
+      aggregateId: rid,
+      occurredAt: now.toISOString(),
+      createdBy: "system",
+      payload: { stepNo: Number(step.step_no), fromPermission: oldPerm, toPermission: escPerm, dueAt: nextDue.toISOString() },
+    });
+    await publishErpEvent({
+      eventType: "EMAIL_NOTIFICATION_REQUESTED",
+      aggregateType: "approval_request",
+      aggregateId: rid,
+      occurredAt: now.toISOString(),
+      createdBy: "system",
+      payload: { template: "approval_escalated", toPermission: escPerm, requestId: rid, stepNo: Number(step.step_no), dueAt: nextDue.toISOString() },
+    });
+    publishEvent("approval", "APPROVAL_ESCALATED", { requestId: rid, stepNo: Number(step.step_no), fromPermission: oldPerm, toPermission: escPerm, dueAt: nextDue.toISOString() });
+    escalated += 1;
+  }
+  return { ok: true, escalated };
+}
+
+let approvalEscalationTimer = null;
+function startApprovalEscalationScheduler() {
+  if (approvalEscalationTimer) return;
+  approvalEscalationTimer = setInterval(() => tickApprovalEscalations().catch(() => {}), 60_000);
 }
 
 async function publishErpEvent(args) {
@@ -10688,6 +11416,7 @@ const server = http.createServer(async (req, res) => {
 
   if (method === "POST" && url.pathname === "/api/customers") {
     if (!requireAnyPermission(res, auth, [Permissions.CustomerManage, Permissions.FleetAdmin])) return;
+    if (!auth.username) return unauthorized(res);
     let body;
     try {
       body = await readJson(req);
@@ -10695,13 +11424,21 @@ const server = http.createServer(async (req, res) => {
       return badRequest(res, "invalid_json");
     }
     if (!body || typeof body !== "object") return badRequest(res, "missing_body");
-    const r = await createCustomer({ body, username: auth.username });
+    const r = await createApprovalRequest({
+      requestType: "MASTERDATA_CHANGE",
+      requestSubtype: "customer_create",
+      requestedBy: auth.username,
+      reason: normalizeString(body.reason) || null,
+      payload: { body },
+      meta: { source: "api", endpoint: "/api/customers" },
+    });
     if (!r.ok) return badRequest(res, r.error);
-    return json(res, 201, { item: r.item });
+    return json(res, 202, { approval: r.item });
   }
 
   if (method === "POST" && url.pathname === "/api/customers/update") {
     if (!requireAnyPermission(res, auth, [Permissions.CustomerManage, Permissions.FleetAdmin])) return;
+    if (!auth.username) return unauthorized(res);
     let body;
     try {
       body = await readJson(req);
@@ -10709,9 +11446,16 @@ const server = http.createServer(async (req, res) => {
       return badRequest(res, "invalid_json");
     }
     if (!body || typeof body !== "object") return badRequest(res, "missing_body");
-    const r = await updateCustomer({ body, username: auth.username });
+    const r = await createApprovalRequest({
+      requestType: "MASTERDATA_CHANGE",
+      requestSubtype: "customer_update",
+      requestedBy: auth.username,
+      reason: normalizeString(body.reason) || null,
+      payload: { body },
+      meta: { source: "api", endpoint: "/api/customers/update" },
+    });
     if (!r.ok) return badRequest(res, r.error);
-    return json(res, 200, { item: r.item });
+    return json(res, 202, { approval: r.item });
   }
 
   if (url.pathname.startsWith("/api/contracts") && method !== "GET" && method !== "POST") {
@@ -10735,6 +11479,7 @@ const server = http.createServer(async (req, res) => {
 
   if (method === "POST" && url.pathname === "/api/contracts") {
     if (!requireAnyPermission(res, auth, [Permissions.ContractManage, Permissions.FleetAdmin])) return;
+    if (!auth.username) return unauthorized(res);
     let body;
     try {
       body = await readJson(req);
@@ -10742,13 +11487,21 @@ const server = http.createServer(async (req, res) => {
       return badRequest(res, "invalid_json");
     }
     if (!body || typeof body !== "object") return badRequest(res, "missing_body");
-    const r = await createContract({ body, username: auth.username });
+    const r = await createApprovalRequest({
+      requestType: "MASTERDATA_CHANGE",
+      requestSubtype: "contract_create",
+      requestedBy: auth.username,
+      reason: normalizeString(body.reason) || null,
+      payload: { body },
+      meta: { source: "api", endpoint: "/api/contracts" },
+    });
     if (!r.ok) return badRequest(res, r.error);
-    return json(res, 201, { item: r.item });
+    return json(res, 202, { approval: r.item });
   }
 
   if (method === "POST" && url.pathname === "/api/contracts/status") {
     if (!requireAnyPermission(res, auth, [Permissions.ContractManage, Permissions.FleetAdmin])) return;
+    if (!auth.username) return unauthorized(res);
     let body;
     try {
       body = await readJson(req);
@@ -10761,9 +11514,16 @@ const server = http.createServer(async (req, res) => {
     const reason = normalizeString(body.reason) || null;
     if (!contractId) return badRequest(res, "contractId_required");
     if (!toStatus) return badRequest(res, "toStatus_required");
-    const r = await setContractStatus({ contractId, toStatus, username: auth.username, reason });
+    const r = await createApprovalRequest({
+      requestType: "MASTERDATA_CHANGE",
+      requestSubtype: "contract_status",
+      requestedBy: auth.username,
+      reason,
+      payload: { contractId, toStatus, reason },
+      meta: { source: "api", endpoint: "/api/contracts/status" },
+    });
     if (!r.ok) return badRequest(res, r.error);
-    return json(res, 200, { item: r.item });
+    return json(res, 202, { approval: r.item });
   }
 
   if (url.pathname.startsWith("/api/items/") && method !== "GET" && method !== "POST") {
@@ -10780,6 +11540,7 @@ const server = http.createServer(async (req, res) => {
 
   if (method === "POST" && url.pathname === "/api/items/materials") {
     if (!requireAnyPermission(res, auth, [Permissions.PricingManage, Permissions.FleetAdmin])) return;
+    if (!auth.username) return unauthorized(res);
     let body;
     try {
       body = await readJson(req);
@@ -10787,9 +11548,16 @@ const server = http.createServer(async (req, res) => {
       return badRequest(res, "invalid_json");
     }
     if (!body || typeof body !== "object") return badRequest(res, "missing_body");
-    const r = await createMaterial({ body, username: auth.username });
+    const r = await createApprovalRequest({
+      requestType: "MASTERDATA_CHANGE",
+      requestSubtype: "material_create",
+      requestedBy: auth.username,
+      reason: normalizeString(body.reason) || null,
+      payload: { body },
+      meta: { source: "api", endpoint: "/api/items/materials" },
+    });
     if (!r.ok) return badRequest(res, r.error);
-    return json(res, 201, { item: r.item });
+    return json(res, 202, { approval: r.item });
   }
 
   if (url.pathname.startsWith("/api/pricing/") && method !== "GET" && method !== "POST") {
@@ -10813,6 +11581,7 @@ const server = http.createServer(async (req, res) => {
 
   if (method === "POST" && url.pathname === "/api/pricing/pricelists") {
     if (!requireAnyPermission(res, auth, [Permissions.PricingManage, Permissions.FleetAdmin])) return;
+    if (!auth.username) return unauthorized(res);
     let body;
     try {
       body = await readJson(req);
@@ -10820,13 +11589,21 @@ const server = http.createServer(async (req, res) => {
       return badRequest(res, "invalid_json");
     }
     if (!body || typeof body !== "object") return badRequest(res, "missing_body");
-    const r = await createPriceList({ body, username: auth.username });
+    const r = await createApprovalRequest({
+      requestType: "PRICING_CHANGE",
+      requestSubtype: "pricelist_create",
+      requestedBy: auth.username,
+      reason: normalizeString(body.reason) || null,
+      payload: { body },
+      meta: { source: "api", endpoint: "/api/pricing/pricelists" },
+    });
     if (!r.ok) return badRequest(res, r.error);
-    return json(res, 201, { item: r.item });
+    return json(res, 202, { approval: r.item });
   }
 
   if (method === "POST" && url.pathname === "/api/pricing/pricelists/items") {
     if (!requireAnyPermission(res, auth, [Permissions.PricingManage, Permissions.FleetAdmin])) return;
+    if (!auth.username) return unauthorized(res);
     let body;
     try {
       body = await readJson(req);
@@ -10834,9 +11611,16 @@ const server = http.createServer(async (req, res) => {
       return badRequest(res, "invalid_json");
     }
     if (!body || typeof body !== "object") return badRequest(res, "missing_body");
-    const r = await createPriceListItem({ body, username: auth.username });
+    const r = await createApprovalRequest({
+      requestType: "PRICING_CHANGE",
+      requestSubtype: "pricelist_item_create",
+      requestedBy: auth.username,
+      reason: normalizeString(body.reason) || null,
+      payload: { body },
+      meta: { source: "api", endpoint: "/api/pricing/pricelists/items" },
+    });
     if (!r.ok) return badRequest(res, r.error);
-    return json(res, 201, { item: r.item });
+    return json(res, 202, { approval: r.item });
   }
 
   if (method === "GET" && url.pathname === "/api/pricing/pricelists/items") {
@@ -10860,6 +11644,7 @@ const server = http.createServer(async (req, res) => {
 
   if (method === "POST" && url.pathname === "/api/pricing/fees") {
     if (!requireAnyPermission(res, auth, [Permissions.PricingManage, Permissions.FleetAdmin])) return;
+    if (!auth.username) return unauthorized(res);
     let body;
     try {
       body = await readJson(req);
@@ -10867,13 +11652,21 @@ const server = http.createServer(async (req, res) => {
       return badRequest(res, "invalid_json");
     }
     if (!body || typeof body !== "object") return badRequest(res, "missing_body");
-    const r = await createFee({ body, username: auth.username });
+    const r = await createApprovalRequest({
+      requestType: "PRICING_CHANGE",
+      requestSubtype: "fee_create",
+      requestedBy: auth.username,
+      reason: normalizeString(body.reason) || null,
+      payload: { body },
+      meta: { source: "api", endpoint: "/api/pricing/fees" },
+    });
     if (!r.ok) return badRequest(res, r.error);
-    return json(res, 201, { item: r.item });
+    return json(res, 202, { approval: r.item });
   }
 
   if (method === "POST" && url.pathname === "/api/pricing/overrides") {
     if (!requireAnyPermission(res, auth, [Permissions.PricingManage, Permissions.FleetAdmin])) return;
+    if (!auth.username) return unauthorized(res);
     let body;
     try {
       body = await readJson(req);
@@ -10881,9 +11674,16 @@ const server = http.createServer(async (req, res) => {
       return badRequest(res, "invalid_json");
     }
     if (!body || typeof body !== "object") return badRequest(res, "missing_body");
-    const r = await createCustomerOverride({ body, username: auth.username });
+    const r = await createApprovalRequest({
+      requestType: "PRICING_CHANGE",
+      requestSubtype: "override_create",
+      requestedBy: auth.username,
+      reason: normalizeString(body.reason) || null,
+      payload: { body },
+      meta: { source: "api", endpoint: "/api/pricing/overrides" },
+    });
     if (!r.ok) return badRequest(res, r.error);
-    return json(res, 201, { item: r.item });
+    return json(res, 202, { approval: r.item });
   }
 
   if (method === "POST" && url.pathname === "/api/pricing/calculate") {
@@ -11809,6 +12609,7 @@ const server = http.createServer(async (req, res) => {
 
   if (method === "POST" && url.pathname === "/api/waste/orders/invoice/mock") {
     if (!requirePermission(res, auth, Permissions.FleetAdmin)) return;
+    if (!auth.username) return unauthorized(res);
     let body;
     try {
       body = await readJson(req);
@@ -11818,19 +12619,27 @@ const server = http.createServer(async (req, res) => {
     if (!body || typeof body !== "object") return badRequest(res, "missing_body");
     const id = normalizeString(body.id);
     if (!id) return badRequest(res, "id_required");
-    let r;
-    try {
-      r = await createMockInvoiceDraft({ orderId: id, currency: body.currency, lines: body.lines, username: auth.username });
-    } catch (e) {
-      return json(res, 500, { error: "invoice_mock_failed", message: String(e && e.message ? e.message : e) });
-    }
+    const order = await getWasteOrderById(id);
+    if (!order) return badRequest(res, "order_not_found");
+    if (order.status !== "weighed") return badRequest(res, "order_not_weighed");
+    const cur = normalizeString(body.currency) || "EUR";
+    if (!/^[A-Z]{3}$/.test(cur)) return badRequest(res, "invalid_currency");
+    const r = await createApprovalRequest({
+      requestType: "BILLING_APPROVAL",
+      requestSubtype: "invoice_mock",
+      requestedBy: auth.username,
+      reason: normalizeString(body.reason) || null,
+      payload: { orderId: id, currency: cur, lines: body.lines },
+      meta: { source: "api", endpoint: "/api/waste/orders/invoice/mock" },
+    });
     if (!r.ok) return badRequest(res, r.error);
-    return json(res, 201, { order: r.order, invoiceDraft: { id: r.invoiceDraftId, currency: r.currency, totalCents: r.totalCents, lines: r.lines } });
+    return json(res, 202, { approval: r.item });
   }
 
   if (method === "POST" && url.pathname === "/api/billing/waste/invoice-drafts") {
     if (!requireAnyPermission(res, auth, [Permissions.PricingManage, Permissions.FleetAdmin])) return;
     if (!pool) return badRequest(res, "db_required");
+    if (!auth.username) return unauthorized(res);
     let body;
     try {
       body = await readJson(req);
@@ -11841,9 +12650,27 @@ const server = http.createServer(async (req, res) => {
     const orderId = normalizeString(body.orderId);
     const pricingCalculationId = normalizeString(body.pricingCalculationId) || null;
     if (!orderId) return badRequest(res, "orderId_required");
-    const r = await createInvoiceDraftFromPricing({ orderId, pricingCalculationId, username: auth.username });
+    const order = await getWasteOrderById(orderId);
+    if (!order) return badRequest(res, "order_not_found");
+    if (order.status !== "weighed") return badRequest(res, "order_not_weighed");
+    if (pricingCalculationId) {
+      const calc = await getPricingCalculationById(pricingCalculationId);
+      if (!calc) return badRequest(res, "pricing_calculation_not_found");
+      if (calc.orderId !== order.id) return badRequest(res, "pricing_calculation_order_mismatch");
+    } else {
+      const latest = await getLatestPricingCalculationForOrder(order.id);
+      if (!latest) return badRequest(res, "pricing_calculation_not_found");
+    }
+    const r = await createApprovalRequest({
+      requestType: "BILLING_APPROVAL",
+      requestSubtype: "invoice_from_pricing",
+      requestedBy: auth.username,
+      reason: normalizeString(body.reason) || null,
+      payload: { orderId, pricingCalculationId },
+      meta: { source: "api", endpoint: "/api/billing/waste/invoice-drafts" },
+    });
     if (!r.ok) return badRequest(res, r.error);
-    return json(res, 201, { order: r.order, invoiceDraft: { id: r.invoiceDraftId, currency: r.currency, totalCents: r.totalCents, pricingCalculationId: r.pricingCalculationId, lines: r.lines } });
+    return json(res, 202, { approval: r.item });
   }
 
   if (method === "GET" && url.pathname === "/api/billing/waste/invoice-drafts") {
@@ -14428,77 +15255,33 @@ const server = http.createServer(async (req, res) => {
 
     const evalResult = await evaluateDispatchDecision({ vehicle, moduleKey, windowStart, windowEnd, context: ctx });
     const hardPresent = evalResult.hardBlocks.length > 0;
-    if (hardPresent && decision === "allow" && !auth.permissions.has(Permissions.OverrideHard)) return forbidden(res);
-    if (evalResult.overrideRequirement === "elevated" && decision === "allow" && !auth.permissions.has(Permissions.OverrideHard)) return forbidden(res);
-
-    const id = `dovr_${crypto.randomUUID().slice(0, 12)}`;
-    const createdAt = new Date().toISOString();
-
-    if (pool) {
-      await pool.query(
-        `
-        insert into fleet_dispatch_override
-          (id, vehicle_id, module, window_start, window_end, decision, reason, username, expires_at, created_at)
-        values
-          ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10);
-        `,
-        [
-          id,
-          vehicleId,
-          moduleKey,
-          windowStart.toISOString(),
-          windowEnd.toISOString(),
-          decision,
-          reason,
-          auth.username,
-          expiresAt ? expiresAt.toISOString() : null,
-          createdAt,
-        ],
-      );
-    }
-
-    await insertAuditLog({
-      id: `al_${crypto.randomUUID()}`,
-      eventType: "DISPATCH_DECISION_OVERRIDDEN",
-      username: auth.username,
-      occurredAt: createdAt,
-      lockType: hardPresent ? "hard" : evalResult.softBlocks.length ? "soft" : null,
-      blockId: null,
+    const approvalBody = {
       vehicleId,
-      blockReason: null,
-      overrideId: id,
-      overrideReason: reason,
-      meta: {
-        endpoint: "/api/fleet/dispatch/decision",
-        method: "POST",
-        module: moduleKey,
-        windowStart: windowStart.toISOString(),
-        windowEnd: windowEnd.toISOString(),
-        baseDecision: evalResult.baseDecision,
-        decision,
-        reasonCode: "manual_override",
-        expiresAt: expiresAt ? expiresAt.toISOString() : null,
-        overrideRequirement: evalResult.overrideRequirement,
-        criteria: evalResult.criteria,
-        reasons: evalResult.reasons,
-        warnings: evalResult.warnings,
+      module: moduleKey,
+      windowStart: windowStart.toISOString(),
+      windowEnd: windowEnd.toISOString(),
+      decision,
+      reason,
+      expiresAt: expiresAt ? expiresAt.toISOString() : null,
+      context: ctx,
+    };
+    const r = await createApprovalRequest({
+      requestType: "ROUTE_OVERRIDE",
+      requestSubtype: "dispatch_decision_override",
+      requestedBy: auth.username,
+      reason,
+      payload: {
+        body: approvalBody,
+        meta: { overrideRequirement: evalResult.overrideRequirement, hardBlocksPresent: hardPresent, requiresHard: hardPresent || evalResult.overrideRequirement === "elevated" },
       },
+      meta: { source: "api", endpoint: "/api/fleet/dispatch/decision", module: moduleKey },
     });
+    if (!r.ok) return badRequest(res, r.error);
 
-    return json(res, 201, {
-      item: {
-        id,
-        vehicleId,
-        module: moduleKey,
-        windowStart: windowStart.toISOString(),
-        windowEnd: windowEnd.toISOString(),
-        decision,
-        reason,
-        username: auth.username,
-        expiresAt: expiresAt ? expiresAt.toISOString() : null,
-        createdAt,
-      },
+    return json(res, 202, {
+      approval: r.item,
       baseDecision: evalResult.baseDecision,
+      overrideRequirement: evalResult.overrideRequirement,
       hardBlocks: evalResult.hardBlocks.map((b) => ({ id: b.id, reason: b.reason, lockType: b.lockType })),
       softBlocks: evalResult.softBlocks.map((b) => ({ id: b.id, reason: b.reason, lockType: b.lockType })),
     });
@@ -14587,6 +15370,96 @@ const server = http.createServer(async (req, res) => {
         createdAt,
       },
     });
+  }
+
+  if (url.pathname.startsWith("/api/approvals") && method !== "GET" && method !== "POST") {
+    return methodNotAllowed(res);
+  }
+
+  if (method === "GET" && url.pathname === "/api/approvals/requests") {
+    if (!requireAnyPermission(res, auth, [Permissions.ApprovalView, Permissions.ViewAudit, Permissions.FleetAdmin])) return;
+    const status = normalizeString(url.searchParams.get("status")) || null;
+    const requestType = normalizeString(url.searchParams.get("type")) || null;
+    const limitRaw = normalizeString(url.searchParams.get("limit"));
+    const items = await listApprovalRequests({ status, requestType, limit: limitRaw ? Number(limitRaw) : 50 });
+    return json(res, 200, { items });
+  }
+
+  if (method === "GET" && url.pathname === "/api/approvals/request") {
+    if (!requireAnyPermission(res, auth, [Permissions.ApprovalView, Permissions.ViewAudit, Permissions.FleetAdmin])) return;
+    const id = normalizeString(url.searchParams.get("id"));
+    if (!id) return badRequest(res, "id_required");
+    const item = await getApprovalRequestById(id);
+    if (!item) return notFound(res);
+    return json(res, 200, { item });
+  }
+
+  if (method === "GET" && url.pathname === "/api/approvals/audit") {
+    if (!requireAnyPermission(res, auth, [Permissions.ApprovalView, Permissions.ViewAudit, Permissions.FleetAdmin])) return;
+    const requestId = normalizeString(url.searchParams.get("requestId")) || null;
+    const limitRaw = normalizeString(url.searchParams.get("limit"));
+    const limit = Math.max(1, Math.min(500, Number(limitRaw) || 100));
+    if (!pool) return json(res, 200, { items: [] });
+    const rows = await pool
+      .query(
+        `
+        select id, request_id, entity_type, entity_id, event_type, username, occurred_at, reason, meta
+        from erp_approval_audit
+        where ($1::text is null or request_id = $1)
+        order by occurred_at desc
+        limit $2;
+        `,
+        [requestId, limit],
+      )
+      .then((r) => r.rows)
+      .catch(() => []);
+    return json(res, 200, {
+      items: rows.map((r) => ({
+        id: r.id,
+        requestId: r.request_id || null,
+        entityType: r.entity_type,
+        entityId: r.entity_id || null,
+        eventType: r.event_type,
+        username: r.username,
+        occurredAt: new Date(r.occurred_at).toISOString(),
+        reason: r.reason || null,
+        meta: r.meta || {},
+      })),
+    });
+  }
+
+  if (method === "POST" && url.pathname === "/api/approvals/approve") {
+    if (!auth.username) return unauthorized(res);
+    let body;
+    try {
+      body = await readJson(req);
+    } catch {
+      return badRequest(res, "invalid_json");
+    }
+    if (!body || typeof body !== "object") return badRequest(res, "missing_body");
+    const requestId = normalizeString(body.requestId);
+    const reason = normalizeString(body.reason) || null;
+    if (!requestId) return badRequest(res, "requestId_required");
+    const r = await decideApprovalRequest({ requestId, decision: "approve", auth, reason });
+    if (!r.ok) return badRequest(res, r.error);
+    return json(res, 200, { item: r.item, applied: r.applied || null });
+  }
+
+  if (method === "POST" && url.pathname === "/api/approvals/reject") {
+    if (!auth.username) return unauthorized(res);
+    let body;
+    try {
+      body = await readJson(req);
+    } catch {
+      return badRequest(res, "invalid_json");
+    }
+    if (!body || typeof body !== "object") return badRequest(res, "missing_body");
+    const requestId = normalizeString(body.requestId);
+    const reason = normalizeString(body.reason) || null;
+    if (!requestId) return badRequest(res, "requestId_required");
+    const r = await decideApprovalRequest({ requestId, decision: "reject", auth, reason });
+    if (!r.ok) return badRequest(res, r.error);
+    return json(res, 200, { item: r.item });
   }
 
   if (url.pathname === "/api/audit/logs" && method !== "GET") {
@@ -15090,6 +15963,7 @@ async function main() {
   server.listen(port, "0.0.0.0", () => {
     console.log(`api listening on :${port}`);
     startHereTrafficScheduler();
+    startApprovalEscalationScheduler();
   });
 }
 

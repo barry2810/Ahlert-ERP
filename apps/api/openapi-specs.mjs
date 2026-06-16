@@ -567,6 +567,39 @@ const routeCatalog = [
       }),
     }),
   })),
+  ...["/api/approvals/requests", "/api/approvals/request", "/api/approvals/audit"].map((raw) => ({
+    path: raw.replace(/^\/api/, ""),
+    rawPath: raw,
+    operations: (v) => ({
+      ...op("get", {
+        tags: ["Approvals"],
+        summary: raw.endsWith("/requests") ? "Freigaben listen" : raw.endsWith("/audit") ? "Freigabe-Audit lesen" : "Freigabe lesen",
+        operationId: `${raw.split("/").filter(Boolean).join("_")}_${v}`,
+        deprecated: ApiVersions[v].deprecated,
+        parameters:
+          raw.endsWith("/requests")
+            ? [qp("status", { type: "string" }, "Status"), qp("type", { type: "string" }, "Request-Typ"), qp("limit", { type: "integer", minimum: 1, maximum: 200 }, "Limit")]
+            : raw.endsWith("/audit")
+              ? [qp("requestId", { type: "string" }, "Request-ID"), qp("limit", { type: "integer", minimum: 1, maximum: 500 }, "Limit")]
+              : [qp("id", { type: "string" }, "Request-ID", true)],
+        responses: withCommon(v, { 200: resp("Freigabedaten", JsonObject, deprecatedHeaders(v)) }),
+      }),
+    }),
+  })),
+  ...["/api/approvals/approve", "/api/approvals/reject"].map((raw) => ({
+    path: raw.replace(/^\/api/, ""),
+    rawPath: raw,
+    operations: (v) => ({
+      ...op("post", {
+        tags: ["Approvals"],
+        summary: raw.endsWith("/approve") ? "Freigabe bestaetigen" : "Freigabe ablehnen",
+        operationId: `${raw.split("/").filter(Boolean).join("_")}_${v}`,
+        deprecated: ApiVersions[v].deprecated,
+        requestBody: requestBody(true, { type: "object", required: ["requestId"], properties: { requestId: { type: "string" }, reason: { type: "string" } } }),
+        responses: withCommon(v, { 200: resp("Freigabe aktualisiert", JsonObject, deprecatedHeaders(v)) }),
+      }),
+    }),
+  })),
   ...["/api/exports/waste/orders", "/api/exports/waste/invoices", "/api/exports/waste/routes"].map((raw) => ({
     path: raw.replace(/^\/api/, ""),
     rawPath: raw,
