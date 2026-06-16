@@ -34,8 +34,21 @@ GitHub-Status:
 - `main` wurde erfolgreich nach GitHub gepusht und ist auf dem Remote verfuegbar.
 - Neutrale GitHub-Testumgebung wurde erfolgreich durchlaufen: Clone, Test-Branch, Aenderung, Push und Rueckpruefung.
 - GitHub CLI `gh` ist authentifiziert und kann Repo-Metadaten per REST lesen.
-- Branch Protection ist fuer dieses private Repository per GitHub-Plan derzeit nicht verfuegbar (`Upgrade to GitHub Pro or make this repository public...`).
 - Der aktuell verwendete GitHub-CLI-Token erlaubt keine PR-Erstellung per API (`Resource not accessible by personal access token`).
+  - Dadurch ist eine vollautomatische PR-Erstellung im Testlauf blockiert, obwohl Git-Push per SSH funktioniert.
+  - Abhilfe: Fine-grained PAT mit `Pull requests: Read and write`.
+
+Neuer Stand (nach Umstellung auf public):
+
+- Repository ist jetzt `public`.
+- Branch Protection fuer `main` ist aktiv und erfolgreich verifiziert.
+  - Required Status Check: `openapi` (strict)
+  - Admins enforced
+  - 1 Approval required
+  - Dismiss stale reviews
+  - Require conversation resolution
+  - Linear history
+  - Keine Force-Pushes/Deletions
 
 Bereits erfolgreich getestet:
 
@@ -280,8 +293,6 @@ Erfolgreich verifiziert:
 Extern blockiert:
 
 - Branch Protection fuer `main`:
-  - GitHub meldet `Upgrade to GitHub Pro or make this repository public to enable this feature.`
-  - Das ist kein lokaler Konfigurationsfehler, sondern eine Tarif-/Plattformgrenze.
 - PR-Erstellung per GitHub-CLI/API:
   - GitHub meldet `Resource not accessible by personal access token`
   - Ursache ist ein zu eingeschraenkter Token fuer Pull-Request-Operationen.
