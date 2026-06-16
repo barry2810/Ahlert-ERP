@@ -24,16 +24,22 @@ Der aktuelle Reparatur- und Verifizierungsstand fuer dieses System ist:
   - `postgres-data/`
   - `redis-data/`
   - `caddy-data/`
-- Der lokale `act`-Lauf wurde in einer neutralen Testkopie erfolgreich bis zum Artifact-Schritt validiert; der Workflow wurde fuer `act` angepasst, damit `upload-artifact` lokal uebersprungen wird.
+- Der lokale `act`-Lauf wurde in einer neutralen Testkopie erfolgreich validiert; der Workflow wurde fuer `act` angepasst, damit `upload-artifact` lokal uebersprungen wird.
+- Da das Home-Verzeichnis schreibgeschuetzt ist, nutzt SSH eine projektlokale Known-Hosts-Datei:
+  - `UserKnownHostsFile /opt/ahlert-erp/.local/ssh/known_hosts`
 
-Noch externer Blocker:
+GitHub-Status:
 
-- Der erzeugte Public Key ist noch nicht bei GitHub hinterlegt.
-- Deshalb schlagen SSH-Authentifizierung, `git ls-remote origin`, Clone/Pull/Push und das Erstellen oder Bestaetigen eines GitHub-Repositorys aktuell noch mit `Permission denied (publickey)` fehl.
+- Public Key ist bei GitHub hinterlegt und SSH-Handshake ist erfolgreich (`Hi barry2810! ...`).
+- `main` wurde erfolgreich nach GitHub gepusht und ist auf dem Remote verfuegbar.
+- Neutrale GitHub-Testumgebung wurde erfolgreich durchlaufen: Clone, Test-Branch, Aenderung, Push und Rueckpruefung.
 
 Bereits erfolgreich getestet:
 
 - Root-Commit lokal erstellt: `168a9ce` (`chore: initialize repository and local git workflow`)
+- Remote-Push nach GitHub erfolgreich:
+  - `main`: `eb31068`
+  - Test-Branch: `test/github-e2e-20260616065819` (Commit `b375ff5`)
 - Neutrale lokale Testkopie via `git clone /opt/ahlert-erp /tmp/ahlert-erp-local-clone`
 - Test-Branch lokal erstellt und gepusht: `test/local-e2e`
 - Lokaler Push-Nachweis gegen das initialisierte Repository erfolgreich
