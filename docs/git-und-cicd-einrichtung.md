@@ -169,6 +169,80 @@ gh auth login
 gh auth status
 ```
 
+## 12. GitHub CLI, Repo-Sicherheit und PR-Workflow (Verifizierung)
+
+### 12.1 Ziel
+
+Dieser Abschnitt verifiziert und haertet das GitHub-Repository nach gaengigen Sicherheitsstandards:
+
+- GitHub CLI ist nicht-interaktiv nutzbar (Token-basiert)
+- Branch-Schutzregeln fuer `main` sind aktiv (PR-only, Reviews, keine Force-Pushes)
+- Repo-Settings sind sinnvoll konfiguriert (Merge-Strategien, Delete-branch-on-merge)
+- PR-Workflow ist technisch verifiziert (Branch -> Push -> PR -> Close -> Branch Delete)
+
+### 12.2 Fine-grained Token (empfohlen)
+
+Erzeuge eine Fine-grained PAT fuer `barry2810/Ahlert-ERP` und setze sie als Environment Variable:
+
+```bash
+export GH_TOKEN="..."
+```
+
+Empfohlene Berechtigungen fuer das Repo:
+
+- Administration: Read/Write (fuer Branch Protection)
+- Contents: Read/Write (fuer Branch/Push/Ref-Loeschung)
+- Pull requests: Read/Write (fuer PR-Erstellung/-Pruefung)
+- Actions: Read (fuer Workflow-/Check-Validierung)
+
+### 12.3 Automatisierte Verifizierung und Einrichtung
+
+Non-interaktiv (kein `gh auth login` erforderlich):
+
+```bash
+node /opt/ahlert-erp/scripts/github-repo-verify.mjs --apply --pr-test
+```
+
+Optional als JSON-Ausgabe:
+
+```bash
+node /opt/ahlert-erp/scripts/github-repo-verify.mjs --apply --pr-test --json
+```
+
+Was dabei passiert:
+
+- Repo-Settings werden gepatcht (u.a. `delete_branch_on_merge`, Merge-Strategien)
+- Branch Protection fuer `main` wird gesetzt:
+  - PR required
+  - 1 Approval required
+  - Dismiss stale reviews
+  - Require conversation resolution
+  - Linear history
+  - Keine Force-Pushes/Deletions
+  - Admins enforced
+  - Status-Checks werden automatisch aus vorhandenen Check-Runs erkannt und nur gesetzt, wenn Checks existieren
+- PR-Workflow wird in einer neutralen Testkopie durchlaufen:
+  - Draft PR wird erstellt
+  - PR wird geschlossen
+  - Test-Branch wird wieder geloescht
+
+### 12.4 Manuelle Kurzchecks (ohne Script)
+
+Mit gesetztem `GH_TOKEN`:
+
+```bash
+PATH=/opt/ahlert-erp/.tools/bin:$PATH
+gh repo view barry2810/Ahlert-ERP
+gh pr list --repo barry2810/Ahlert-ERP --limit 10
+```
+
+Branch Protection anzeigen:
+
+```bash
+PATH=/opt/ahlert-erp/.tools/bin:$PATH
+gh api repos/barry2810/Ahlert-ERP/branches/main/protection
+```
+
 ### 2.3 Remote-Repository erstellen
 
 Wenn das Zielsystem noch nicht existiert:
