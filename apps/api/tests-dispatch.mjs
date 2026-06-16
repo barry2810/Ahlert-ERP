@@ -26,6 +26,7 @@ function iso(d) {
 }
 
 const AdminHeaders = { "x-user": "fleet_admin", "x-permissions": "FLEET_ADMIN" };
+const ApproverAdminHeaders = { "x-user": "approver_admin", "x-permissions": "FLEET_ADMIN" };
 const WorkshopAdminHeaders = { "x-user": "workshop_admin", "x-permissions": "WORKSHOP_ADMIN" };
 const WorkshopLeadHeaders = { "x-user": "workshop_lead", "x-permissions": "WORKSHOP_ASSIGN,WORKSHOP_VIEW" };
 const DriverHeaders = { "x-user": "driver_01", "x-permissions": "WORKSHOP_CREATE,WORKSHOP_VIEW" };
@@ -38,6 +39,21 @@ function expectBadRequest(r, message) {
   assert.equal(r.status, 400);
   assert.equal(r.json?.error, "bad_request");
   assert.equal(r.json?.message, message);
+}
+
+async function approveUntilApplied(approvalId) {
+  let applied = null;
+  for (let i = 0; i < 5; i += 1) {
+    const current = await req(`/api/approvals/request?id=${encodeURIComponent(approvalId)}`, { headers: ApproverAdminHeaders });
+    assert.equal(current.status, 200);
+    const status = current.json?.item?.status;
+    if (status === "applied") return { item: current.json?.item, applied };
+    const r = await req("/api/approvals/approve", { method: "POST", headers: ApproverAdminHeaders, body: { requestId: approvalId, reason: "test-approval" } });
+    assert.equal(r.status, 200);
+    if (r.json?.applied) applied = r.json?.applied;
+    if (r.json?.item?.status === "applied") return { item: r.json?.item, applied };
+  }
+  throw new Error("approval_not_applied");
 }
 
 async function ensureAnyCatalogContainer() {
@@ -157,7 +173,7 @@ await req("/api/fleet/admin/vehicle-location", {
   assert.equal(r.json?.baseDecision, "deny");
   assert.equal(r.json?.reasonCode, "adr_not_supported");
 
-  const overrideFail = await req("/api/fleet/dispatch/decision", {
+  const overrideReq = await req("/api/fleet/dispatch/decision", {
     method: "POST",
     headers: OverrideHeaders,
     body: {
@@ -170,22 +186,15 @@ await req("/api/fleet/admin/vehicle-location", {
       context: { adrClass: "1" },
     },
   });
-  assert.equal(overrideFail.status, 403);
+  assert.equal(overrideReq.status, 202);
+  const approvalId = overrideReq.json?.approval?.id;
+  assert.ok(approvalId);
 
-  const overrideOk = await req("/api/fleet/dispatch/decision", {
-    method: "POST",
-    headers: OverrideHardHeaders,
-    body: {
-      vehicleId: "veh_01",
-      module: "waste",
-      windowStart: iso(adrWindowStart),
-      windowEnd: iso(adrWindowEnd),
-      decision: "allow",
-      reason: "Selftest ADR-Override mit Hard-Recht",
-      context: { adrClass: "1" },
-    },
-  });
-  assert.equal(overrideOk.status, 201);
+  await approveUntilApplied(approvalId);
+  const after = await req(`/api/fleet/dispatch/decision?vehicleId=veh_01&module=waste&${windowQuery(adrWindowStart, adrWindowEnd)}&adrClass=1`);
+  assert.equal(after.status, 200);
+  assert.equal(after.json?.decision, "allow");
+  assert.equal(after.json?.reasonCode, "manual_override");
 }
 
 {
@@ -360,12 +369,15 @@ await req("/api/fleet/admin/system-status", {
 
 {
   const wasteCustomerNo = `CUST_${Math.floor(Math.random() * 1_000_000)}`;
-  const customer = await req("/api/customers", {
+  const customerReq = await req("/api/customers", {
     method: "POST",
     headers: AdminHeaders,
     body: { customerNo: wasteCustomerNo, name: "Testkunde Entsorgung", email: "test@example.invalid", active: true },
   });
-  assert.equal(customer.status, 201);
+  assert.equal(customerReq.status, 202);
+  const approvalId = customerReq.json?.approval?.id;
+  assert.ok(approvalId);
+  await approveUntilApplied(approvalId);
 
   const anySourceKey = await ensureAnyCatalogContainer();
 
@@ -439,13 +451,18 @@ await req("/api/fleet/admin/system-status", {
     assert.equal(weigh.status, 201);
     assert.equal(weigh.json?.order?.status, "weighed");
 
-    const inv = await req("/api/waste/orders/invoice/mock", {
+    const invReq = await req("/api/waste/orders/invoice/mock", {
       method: "POST",
       headers: AdminHeaders,
       body: { id: orderId, currency: "EUR", lines: [{ label: "Containerdienst", qty: 1, unitPriceCents: 19900 }] },
     });
-    assert.equal(inv.status, 201);
-    assert.equal(inv.json?.order?.status, "invoiced");
+    assert.equal(invReq.status, 202);
+    const invApprovalId = invReq.json?.approval?.id;
+    assert.ok(invApprovalId);
+    await approveUntilApplied(invApprovalId);
+    const invoiced = await req(`/api/waste/orders?id=${encodeURIComponent(orderId)}`, { headers: AdminHeaders });
+    assert.equal(invoiced.status, 200);
+    assert.equal(invoiced.json?.order?.status, "invoiced");
 
     const close = await req("/api/waste/orders/status", {
       method: "POST",
@@ -467,50 +484,73 @@ await req("/api/fleet/admin/system-status", {
 
 {
   const wasteCustomerNo = `CUST_PRICE_${Math.floor(Math.random() * 1_000_000)}`;
-  const customer = await req("/api/customers", {
+  const customerReq = await req("/api/customers", {
     method: "POST",
     headers: AdminHeaders,
     body: { customerNo: wasteCustomerNo, name: "Testkunde Pricing", active: true },
   });
-  assert.equal(customer.status, 201);
+  assert.equal(customerReq.status, 202);
+  const customerApprovalId = customerReq.json?.approval?.id;
+  assert.ok(customerApprovalId);
+  const customerApproval = await approveUntilApplied(customerApprovalId);
+  assert.equal(customerApproval.applied?.ok, true);
+  const customer = await req(`/api/customers?id=${encodeURIComponent(wasteCustomerNo)}`, { headers: AdminHeaders });
+  assert.equal(customer.status, 200);
 
   const materialCode = `MAT_${Math.floor(Math.random() * 1_000_000)}`;
-  const material = await req("/api/items/materials", { method: "POST", headers: AdminHeaders, body: { code: materialCode, name: "Gemischte Abfälle", unit: "t", active: true } });
-  assert.equal(material.status, 201);
+  const materialReq = await req("/api/items/materials", { method: "POST", headers: AdminHeaders, body: { code: materialCode, name: "Gemischte Abfälle", unit: "t", active: true } });
+  assert.equal(materialReq.status, 202);
+  const materialApprovalId = materialReq.json?.approval?.id;
+  assert.ok(materialApprovalId);
+  const materialApproval = await approveUntilApplied(materialApprovalId);
+  assert.equal(materialApproval.applied?.ok, true);
 
   const plCode = `PL_${Math.floor(Math.random() * 1_000_000)}`;
   const validFrom = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
-  const pricelist = await req("/api/pricing/pricelists", {
+  const pricelistReq = await req("/api/pricing/pricelists", {
     method: "POST",
     headers: AdminHeaders,
     body: { code: plCode, name: "Standardpreise", currency: "EUR", status: "active", validFrom },
   });
-  assert.equal(pricelist.status, 201);
-  const priceListId = pricelist.json?.item?.id;
+  assert.equal(pricelistReq.status, 202);
+  const priceListApprovalId = pricelistReq.json?.approval?.id;
+  assert.ok(priceListApprovalId);
+  const pricelistApproval = await approveUntilApplied(priceListApprovalId);
+  assert.equal(pricelistApproval.applied?.ok, true);
+  const priceListId = pricelistApproval.applied?.item?.id;
   assert.ok(priceListId);
-  assert.equal(pricelist.json?.item?.validFrom, validFrom);
+  assert.equal(pricelistApproval.applied?.item?.validFrom, validFrom);
 
-  const svcItem = await req("/api/pricing/pricelists/items", {
+  const svcItemReq = await req("/api/pricing/pricelists/items", {
     method: "POST",
     headers: AdminHeaders,
     body: { priceListId, itemType: "service", refCode: "deliver_pickup", unit: "order", minQty: 0, unitPriceCents: 15000 },
   });
-  assert.equal(svcItem.status, 201);
+  assert.equal(svcItemReq.status, 202);
+  const svcApprovalId = svcItemReq.json?.approval?.id;
+  assert.ok(svcApprovalId);
+  await approveUntilApplied(svcApprovalId);
 
-  const matItem = await req("/api/pricing/pricelists/items", {
+  const matItemReq = await req("/api/pricing/pricelists/items", {
     method: "POST",
     headers: AdminHeaders,
     body: { priceListId, itemType: "material", refCode: materialCode, unit: "t", minQty: 0, unitPriceCents: 9900 },
   });
-  assert.equal(matItem.status, 201);
+  assert.equal(matItemReq.status, 202);
+  const matApprovalId = matItemReq.json?.approval?.id;
+  assert.ok(matApprovalId);
+  await approveUntilApplied(matApprovalId);
 
   const feeCode = `CO2_${Math.floor(Math.random() * 1_000_000)}`;
-  const fee = await req("/api/pricing/fees", {
+  const feeReq = await req("/api/pricing/fees", {
     method: "POST",
     headers: AdminHeaders,
     body: { code: feeCode, name: "CO2-Abgabe", calculationMode: "per_ton", amountCents: 150, currency: "EUR", validFrom },
   });
-  assert.equal(fee.status, 201);
+  assert.equal(feeReq.status, 202);
+  const feeApprovalId = feeReq.json?.approval?.id;
+  assert.ok(feeApprovalId);
+  await approveUntilApplied(feeApprovalId);
 
   const anySourceKey = await ensureAnyCatalogContainer();
   const create = await req("/api/waste/orders", {
@@ -561,10 +601,12 @@ await req("/api/fleet/admin/system-status", {
     assert.equal(history.status, 200);
     assert.ok((history.json?.items || []).length >= 2);
 
-    const inv = await req("/api/billing/waste/invoice-drafts", { method: "POST", headers: AdminHeaders, body: { orderId } });
-    assert.equal(inv.status, 201);
-    assert.ok(inv.json?.invoiceDraft?.id);
-    assert.ok(inv.json?.invoiceDraft?.pricingCalculationId);
+    const invReq = await req("/api/billing/waste/invoice-drafts", { method: "POST", headers: AdminHeaders, body: { orderId } });
+    assert.equal(invReq.status, 202);
+    const invApprovalId = invReq.json?.approval?.id;
+    assert.ok(invApprovalId);
+    const invApproval = await approveUntilApplied(invApprovalId);
+    assert.equal(invApproval.applied?.ok, true);
 
     const invList = await req(`/api/billing/waste/invoice-drafts?orderId=${encodeURIComponent(orderId)}&limit=10`, { headers: AdminHeaders });
     assert.equal(invList.status, 200);
@@ -664,8 +706,11 @@ await req("/api/fleet/admin/system-status", {
     assert.ok(pick, "no_unblocked_waste_vehicle_found");
     acceptance.vehicleId = pick.vehicleId;
     const wasteCustomerNo = `CUST_ACC_${Math.floor(Math.random() * 1_000_000)}`;
-    const customer = await req("/api/customers", { method: "POST", headers: AdminHeaders, body: { customerNo: wasteCustomerNo, name: "Testkunde Acceptance", active: true } });
-    assert.equal(customer.status, 201);
+    const customerReq = await req("/api/customers", { method: "POST", headers: AdminHeaders, body: { customerNo: wasteCustomerNo, name: "Testkunde Acceptance", active: true } });
+    assert.equal(customerReq.status, 202);
+    const custApprovalId = customerReq.json?.approval?.id;
+    assert.ok(custApprovalId);
+    await approveUntilApplied(custApprovalId);
 
     const create = await req("/api/waste/orders", {
       method: "POST",
@@ -723,13 +768,18 @@ await req("/api/fleet/admin/system-status", {
     assert.equal(weigh.status, 201);
     acceptance.steps.push({ step: "weigh_mock", status: weigh.json?.order?.status });
 
-    const inv = await req("/api/waste/orders/invoice/mock", {
+    const invReq = await req("/api/waste/orders/invoice/mock", {
       method: "POST",
       headers: AdminHeaders,
       body: { id: orderId, currency: "EUR", lines: [{ label: "Containerdienst", qty: 1, unitPriceCents: 19900 }] },
     });
-    assert.equal(inv.status, 201);
-    acceptance.steps.push({ step: "invoice_mock", status: inv.json?.order?.status });
+    assert.equal(invReq.status, 202);
+    const invApprovalId = invReq.json?.approval?.id;
+    assert.ok(invApprovalId);
+    await approveUntilApplied(invApprovalId);
+    const afterInv = await req(`/api/waste/orders?id=${encodeURIComponent(orderId)}`, { headers: AdminHeaders });
+    assert.equal(afterInv.status, 200);
+    acceptance.steps.push({ step: "invoice_mock", status: afterInv.json?.order?.status });
 
     const closed = await req("/api/waste/orders/status", { method: "POST", headers: AdminHeaders, body: { id: orderId, toStatus: "closed", reason: "closed" } });
     assert.equal(closed.status, 200);
@@ -820,9 +870,13 @@ await req("/api/fleet/admin/system-status", {
 
   const day = iso(routeWindowStart).slice(0, 10);
   const wasteCustomerNo = `CUST_ROUTE_${Math.floor(Math.random() * 1_000_000)}`;
-  await req("/api/customers", { method: "POST", headers: AdminHeaders, body: { customerNo: wasteCustomerNo, name: "Testkunde Route", active: true } }).then((r) =>
-    assert.equal(r.status, 201),
-  );
+  {
+    const customerReq = await req("/api/customers", { method: "POST", headers: AdminHeaders, body: { customerNo: wasteCustomerNo, name: "Testkunde Route", active: true } });
+    assert.equal(customerReq.status, 202);
+    const approvalId = customerReq.json?.approval?.id;
+    assert.ok(approvalId);
+    await approveUntilApplied(approvalId);
+  }
 
   const create1 = await req("/api/waste/orders", {
     method: "POST",
