@@ -414,6 +414,204 @@ const routeCatalog = [
     }),
   },
   {
+    path: "/controlling/entries",
+    rawPath: "/api/controlling/entries",
+    operations: (v) => ({
+      ...op("get", {
+        tags: ["Controlling"],
+        summary: "KLR-Entries lesen",
+        operationId: `controllingEntriesList_${v}`,
+        deprecated: ApiVersions[v].deprecated,
+        parameters: [
+          qp("objectType", { type: "string" }, "Objekt-Typ"),
+          qp("objectId", { type: "string" }, "Objekt-ID"),
+          qp("entryType", { type: "string", enum: ["revenue", "cost"] }, "Entry-Typ"),
+          qp("costCenter", { type: "string" }, "Kostenstelle"),
+          qp("from", { type: "string", format: "date-time" }, "Von"),
+          qp("to", { type: "string", format: "date-time" }, "Bis"),
+          qp("limit", { type: "integer", minimum: 1, maximum: 1000 }, "Maximale Anzahl"),
+        ],
+        responses: withCommon(v, { 200: resp("Entries", JsonObject, deprecatedHeaders(v)) }),
+      }),
+      ...op("post", {
+        tags: ["Controlling"],
+        summary: "KLR-Entry anlegen",
+        operationId: `controllingEntriesCreate_${v}`,
+        deprecated: ApiVersions[v].deprecated,
+        requestBody: requestBody(true, JsonObject),
+        responses: withCommon(v, { 201: resp("Entry angelegt", JsonObject, deprecatedHeaders(v)) }),
+      }),
+    }),
+  },
+  {
+    path: "/controlling/contribution",
+    rawPath: "/api/controlling/contribution",
+    operations: (v) => ({
+      ...op("get", {
+        tags: ["Controlling"],
+        summary: "Deckungsbeitrag pro Objekt berechnen",
+        operationId: `controllingContribution_${v}`,
+        deprecated: ApiVersions[v].deprecated,
+        parameters: [
+          qp("objectType", { type: "string" }, "Objekt-Typ", true),
+          qp("objectId", { type: "string" }, "Objekt-ID", true),
+          qp("from", { type: "string", format: "date-time" }, "Von"),
+          qp("to", { type: "string", format: "date-time" }, "Bis"),
+        ],
+        responses: withCommon(v, { 200: resp("Deckungsbeitrag", JsonObject, deprecatedHeaders(v)) }),
+      }),
+    }),
+  },
+  {
+    path: "/reporting/mart/refresh",
+    rawPath: "/api/reporting/mart/refresh",
+    operations: (v) => ({
+      ...op("post", {
+        tags: ["Reporting"],
+        summary: "Data-Mart Refresh als Job starten",
+        operationId: `reportingMartRefresh_${v}`,
+        deprecated: ApiVersions[v].deprecated,
+        requestBody: requestBody(false, { type: "object", properties: { fromDay: { type: "string", format: "date" }, toDay: { type: "string", format: "date" } } }),
+        responses: withCommon(v, { 202: resp("Refresh Job gestartet", JsonObject, deprecatedHeaders(v)) }),
+      }),
+    }),
+  },
+  {
+    path: "/reporting/mart/finance/daily",
+    rawPath: "/api/reporting/mart/finance/daily",
+    operations: (v) => ({
+      ...op("get", {
+        tags: ["Reporting"],
+        summary: "Finance Daily aus Data-Mart lesen",
+        operationId: `reportingMartFinanceDaily_${v}`,
+        deprecated: ApiVersions[v].deprecated,
+        parameters: [
+          qp("fromDay", { type: "string", format: "date" }, "Von (Tag)"),
+          qp("toDay", { type: "string", format: "date" }, "Bis (Tag)"),
+          qp("costCenter", { type: "string" }, "Kostenstelle"),
+          qp("currency", { type: "string", pattern: "^[A-Z]{3}$" }, "Waehrung"),
+          qp("limit", { type: "integer", minimum: 1, maximum: 2000 }, "Maximale Anzahl"),
+        ],
+        responses: withCommon(v, { 200: resp("Finance Daily", JsonObject, deprecatedHeaders(v)) }),
+      }),
+    }),
+  },
+  {
+    path: "/reporting/mart/waste/daily",
+    rawPath: "/api/reporting/mart/waste/daily",
+    operations: (v) => ({
+      ...op("get", {
+        tags: ["Reporting"],
+        summary: "Waste Daily aus Data-Mart lesen",
+        operationId: `reportingMartWasteDaily_${v}`,
+        deprecated: ApiVersions[v].deprecated,
+        parameters: [
+          qp("fromDay", { type: "string", format: "date" }, "Von (Tag)"),
+          qp("toDay", { type: "string", format: "date" }, "Bis (Tag)"),
+          qp("limit", { type: "integer", minimum: 1, maximum: 2000 }, "Maximale Anzahl"),
+        ],
+        responses: withCommon(v, { 200: resp("Waste Daily", JsonObject, deprecatedHeaders(v)) }),
+      }),
+    }),
+  },
+  {
+    path: "/reporting/mart/waste/orders",
+    rawPath: "/api/reporting/mart/waste/orders",
+    operations: (v) => ({
+      ...op("get", {
+        tags: ["Reporting"],
+        summary: "Waste Order Fact aus Data-Mart lesen",
+        operationId: `reportingMartWasteOrders_${v}`,
+        deprecated: ApiVersions[v].deprecated,
+        parameters: [
+          qp("status", { type: "string" }, "Status"),
+          qp("customerRefId", { type: "string" }, "Customer Ref ID"),
+          qp("fromUpdatedAt", { type: "string", format: "date-time" }, "Von updatedAt"),
+          qp("toUpdatedAt", { type: "string", format: "date-time" }, "Bis updatedAt"),
+          qp("limit", { type: "integer", minimum: 1, maximum: 1000 }, "Maximale Anzahl"),
+        ],
+        responses: withCommon(v, { 200: resp("Waste Orders Fact", JsonObject, deprecatedHeaders(v)) }),
+      }),
+    }),
+  },
+  {
+    path: "/mobile/bootstrap",
+    rawPath: "/api/mobile/bootstrap",
+    operations: (v) => ({
+      ...op("get", {
+        tags: ["Mobile"],
+        summary: "Mobile Bootstrap (Offline Startdaten)",
+        operationId: `mobileBootstrap_${v}`,
+        deprecated: ApiVersions[v].deprecated,
+        parameters: [qp("deviceId", { type: "string" }, "Device ID")],
+        responses: withCommon(v, { 200: resp("Bootstrap", JsonObject, deprecatedHeaders(v)) }),
+      }),
+    }),
+  },
+  {
+    path: "/mobile/sync/push",
+    rawPath: "/api/mobile/sync/push",
+    operations: (v) => ({
+      ...op("post", {
+        tags: ["Mobile"],
+        summary: "Mobile Offline-Operations pushen (als Job verarbeiten)",
+        operationId: `mobileSyncPush_${v}`,
+        deprecated: ApiVersions[v].deprecated,
+        requestBody: requestBody(true, JsonObject),
+        responses: withCommon(v, { 202: resp("Push akzeptiert", JsonObject, deprecatedHeaders(v)) }),
+      }),
+    }),
+  },
+  {
+    path: "/mobile/sync/ops",
+    rawPath: "/api/mobile/sync/ops",
+    operations: (v) => ({
+      ...op("get", {
+        tags: ["Mobile"],
+        summary: "Mobile Offline-Operations Status lesen",
+        operationId: `mobileSyncOps_${v}`,
+        deprecated: ApiVersions[v].deprecated,
+        parameters: [qp("deviceId", { type: "string" }, "Device ID", true), qp("status", { type: "string" }, "Status"), qp("limit", { type: "integer", minimum: 1, maximum: 500 }, "Maximale Anzahl")],
+        responses: withCommon(v, { 200: resp("Ops", JsonObject, deprecatedHeaders(v)) }),
+      }),
+    }),
+  },
+  {
+    path: "/mobile/sync/pull",
+    rawPath: "/api/mobile/sync/pull",
+    operations: (v) => ({
+      ...op("get", {
+        tags: ["Mobile"],
+        summary: "Mobile Delta Pull (Events)",
+        operationId: `mobileSyncPull_${v}`,
+        deprecated: ApiVersions[v].deprecated,
+        parameters: [
+          qp("deviceId", { type: "string" }, "Device ID", true),
+          qp("afterId", { type: "string" }, "Nach Event-ID"),
+          qp("limit", { type: "integer", minimum: 1, maximum: 500 }, "Maximale Anzahl"),
+          qp("types", { type: "string" }, "Event Types (CSV)"),
+          qp("aggregateType", { type: "string" }, "Aggregate Typ"),
+          qp("aggregateId", { type: "string" }, "Aggregate ID"),
+        ],
+        responses: withCommon(v, { 200: resp("Events", JsonObject, deprecatedHeaders(v)) }),
+      }),
+    }),
+  },
+  {
+    path: "/mobile/sync/ack",
+    rawPath: "/api/mobile/sync/ack",
+    operations: (v) => ({
+      ...op("post", {
+        tags: ["Mobile"],
+        summary: "Mobile Event Offset ack",
+        operationId: `mobileSyncAck_${v}`,
+        deprecated: ApiVersions[v].deprecated,
+        requestBody: requestBody(true, JsonObject),
+        responses: withCommon(v, { 200: resp("Ack", JsonObject, deprecatedHeaders(v)) }),
+      }),
+    }),
+  },
+  {
     path: "/waste/orders",
     rawPath: "/api/waste/orders",
     operations: (v) => ({
@@ -567,6 +765,188 @@ const routeCatalog = [
       }),
     }),
   })),
+  ...[
+    ["/api/integrations/kinds", "Integrationsarten listen", "get"],
+    ["/api/integrations/systems", "Integrationssysteme lesen", "get"],
+    ["/api/integrations/systems", "Integrationssystem anlegen", "post"],
+    ["/api/integrations/systems/update", "Integrationssystem aktualisieren", "post"],
+    ["/api/integrations/subscriptions", "Integrations-Subscriptions lesen", "get"],
+    ["/api/integrations/subscriptions", "Integrations-Subscription anlegen/aktualisieren", "post"],
+    ["/api/integrations/dispatch", "Integrations-Dispatch als Job starten", "post"],
+  ].map(([raw, summary, method]) => ({
+    path: raw.replace(/^\/api/, ""),
+    rawPath: raw,
+    operations: (v) => ({
+      ...op(method, {
+        tags: ["Integrations"],
+        summary,
+        operationId: `${raw.split("/").filter(Boolean).join("_")}_${v}`,
+        deprecated: ApiVersions[v].deprecated,
+        parameters:
+          method === "get" && raw === "/api/integrations/systems"
+            ? [qp("kind", { type: "string" }, "Kind"), qp("status", { type: "string" }, "Status"), qp("limit", { type: "integer", minimum: 1, maximum: 1000 }, "Maximale Anzahl")]
+            : method === "get" && raw === "/api/integrations/subscriptions"
+              ? [qp("systemId", { type: "string" }, "System-ID"), qp("activeOnly", { type: "boolean" }, "Nur aktive"), qp("limit", { type: "integer", minimum: 1, maximum: 2000 }, "Maximale Anzahl")]
+              : [],
+        requestBody: method === "post" ? requestBody(true, JsonObject) : undefined,
+        responses: withCommon(v, { 200: resp("Antwort", JsonObject, deprecatedHeaders(v)), 201: resp("Angelegt", JsonObject, deprecatedHeaders(v)), 202: resp("Job gestartet", JsonObject, deprecatedHeaders(v)) }),
+      }),
+    }),
+  })),
+  {
+    path: "/search",
+    rawPath: "/api/search",
+    operations: (v) => ({
+      ...op("get", {
+        tags: ["Search"],
+        summary: "Moduluebergreifende Suche mit Berechtigungsfilter",
+        operationId: `globalSearch_${v}`,
+        deprecated: ApiVersions[v].deprecated,
+        parameters: [
+          qp("q", { type: "string" }, "Suchbegriff", true),
+          qp("modules", { type: "string" }, "CSV Modulfilter, z. B. fleet,customers,documents"),
+          qp("limit", { type: "integer", minimum: 1, maximum: 100 }, "Maximale Anzahl"),
+        ],
+        responses: withCommon(v, { 200: resp("Suchtreffer", JsonObject, deprecatedHeaders(v)) }),
+      }),
+    }),
+  },
+  ...[
+    ["/api/main-menu", "Hauptmenü laden", "get"],
+    ["/api/main-menu/audit", "Hauptmenü-Interaktion protokollieren", "post"],
+    ["/api/main-menu/audit", "Hauptmenü-Audit lesen", "get"],
+  ].map(([raw, summary, method]) => ({
+    path: raw.replace(/^\/api/, ""),
+    rawPath: raw,
+    operations: (v) => ({
+      ...op(method, {
+        tags: ["MainMenu"],
+        summary,
+        operationId: `${raw.split("/").filter(Boolean).join("_")}_${v}`,
+        deprecated: ApiVersions[v].deprecated,
+        parameters: method === "get" && raw.endsWith("/audit") ? [qp("username", { type: "string" }, "Benutzername"), qp("limit", { type: "integer", minimum: 1, maximum: 500 }, "Limit")] : [],
+        requestBody: method === "post" ? requestBody(true, JsonObject) : undefined,
+        responses: withCommon(v, { 200: resp("Antwort", JsonObject, deprecatedHeaders(v)), 201: resp("Protokolliert", JsonObject, deprecatedHeaders(v)) }),
+      }),
+    }),
+  })),
+  ...[
+    ["/api/business-rules", "Fachregeln lesen", "get"],
+    ["/api/business-rules", "Fachregeln speichern", "post"],
+    ["/api/business-rules/evaluate", "Fachregeln simulieren", "post"],
+  ].map(([raw, summary, method]) => ({
+    path: raw.replace(/^\/api/, ""),
+    rawPath: raw,
+    operations: (v) => ({
+      ...op(method, {
+        tags: ["BusinessRules"],
+        summary,
+        operationId: `${raw.split("/").filter(Boolean).join("_")}_${v}`,
+        deprecated: ApiVersions[v].deprecated,
+        parameters:
+          method === "get"
+            ? [qp("domain", { type: "string" }, "Domain"), qp("activeOnly", { type: "boolean" }, "Nur aktive Regeln"), qp("limit", { type: "integer", minimum: 1, maximum: 2000 }, "Limit")]
+            : [],
+        requestBody: method === "post" ? requestBody(true, JsonObject) : undefined,
+        responses: withCommon(v, { 200: resp("Antwort", JsonObject, deprecatedHeaders(v)) }),
+      }),
+    }),
+  })),
+  ...[
+    ["/api/sewage/assets", "Kanal-Netzobjekte lesen", "get"],
+    ["/api/sewage/assets", "Kanal-Netzobjekt speichern", "post"],
+    ["/api/sewage/orders", "Kanal-Auftraege lesen", "get"],
+    ["/api/sewage/orders", "Kanal-Auftrag speichern", "post"],
+    ["/api/sewage/executions", "Kanal-Einsaetze lesen", "get"],
+    ["/api/sewage/executions", "Kanal-Einsatz speichern", "post"],
+    ["/api/sewage/findings", "Kanal-Befund speichern", "post"],
+    ["/api/sewage/media/link", "Kanal-Medium verknuepfen", "post"],
+    ["/api/sewage/billing/prepare", "Kanal-Abrechnung vorbereiten", "post"],
+  ].map(([raw, summary, method]) => ({
+    path: raw.replace(/^\/api/, ""),
+    rawPath: raw,
+    operations: (v) => ({
+      ...op(method, {
+        tags: ["Sewage"],
+        summary,
+        operationId: `${raw.split("/").filter(Boolean).join("_")}_${v}`,
+        deprecated: ApiVersions[v].deprecated,
+        parameters: method === "get" ? [qp("id", { type: "string" }, "Objekt-ID"), qp("status", { type: "string" }, "Status"), qp("customerId", { type: "string" }, "Kunde"), qp("assetType", { type: "string" }, "Netzobjekttyp"), qp("orderId", { type: "string" }, "Auftrags-ID"), qp("limit", { type: "integer", minimum: 1, maximum: 200 }, "Limit")] : [],
+        requestBody: method === "post" ? requestBody(true, JsonObject) : undefined,
+        responses: withCommon(v, { 200: resp("Antwort", JsonObject, deprecatedHeaders(v)), 201: resp("Erstellt", JsonObject, deprecatedHeaders(v)) }),
+      }),
+    }),
+  })),
+  ...[
+    ["/api/portal/accounts", "Portal-Konten lesen", "get"],
+    ["/api/portal/accounts", "Portal-Konto speichern", "post"],
+    ["/api/portal/assignments", "Portal-Zuweisung speichern", "post"],
+    ["/api/portal/documents/link", "Portal-Dokument freigeben", "post"],
+    ["/api/portal/login", "Portal-Login", "post"],
+    ["/api/portal/logout", "Portal-Logout", "post"],
+    ["/api/portal/me", "Portal-Profil lesen", "get"],
+    ["/api/portal/dashboard", "Portal-Dashboard lesen", "get"],
+    ["/api/portal/orders", "Portal-Auftraege lesen", "get"],
+    ["/api/portal/orders/status", "Portal-Auftragsstatus melden", "post"],
+    ["/api/portal/contracts", "Portal-Vertraege lesen", "get"],
+    ["/api/portal/routes", "Portal-Touren lesen", "get"],
+    ["/api/portal/documents", "Portal-Dokumente lesen", "get"],
+    ["/api/portal/audit", "Portal-Audit lesen", "get"],
+  ].map(([raw, summary, method]) => ({
+    path: raw.replace(/^\/api/, ""),
+    rawPath: raw,
+    operations: (v) => ({
+      ...op(method, {
+        tags: ["Portal"],
+        summary,
+        operationId: `${raw.split("/").filter(Boolean).join("_")}_${v}`,
+        deprecated: ApiVersions[v].deprecated,
+        requestBody: method === "post" ? requestBody(true, JsonObject) : undefined,
+        responses: withCommon(v, { 200: resp("Antwort", JsonObject, deprecatedHeaders(v)), 201: resp("Erstellt", JsonObject, deprecatedHeaders(v)) }),
+      }),
+    }),
+  })),
+  ...[
+    ["/api/notifications/center/items", "Benachrichtigungen der Zentrale lesen", "get"],
+    ["/api/notifications/center/ack", "Benachrichtigung bestaetigen", "post"],
+    ["/api/notifications/center/deliveries", "Zustellprotokolle lesen", "get"],
+    ["/api/notifications/center/escalations", "Eskalationen lesen", "get"],
+    ["/api/notifications/center/audit", "Benachrichtigungs-Audit lesen", "get"],
+    ["/api/notifications/center/channels", "Kanaele lesen", "get"],
+    ["/api/notifications/center/channels", "Kanaele konfigurieren", "post"],
+    ["/api/notifications/center/rules", "Benachrichtigungsregeln lesen", "get"],
+    ["/api/notifications/center/rules", "Benachrichtigungsregeln speichern", "post"],
+    ["/api/notifications/center/trigger", "Benachrichtigung ausloesen", "post"],
+    ["/api/notifications/center/tick", "SLA- und Eskalations-Tick ausfuehren", "post"],
+    ["/api/notifications/center/quality", "Qualitaetsmetriken lesen", "get"],
+  ].map(([raw, summary, method]) => ({
+    path: raw.replace(/^\/api/, ""),
+    rawPath: raw,
+    operations: (v) => ({
+      ...op(method, {
+        tags: ["Notifications"],
+        summary,
+        operationId: `${raw.split("/").filter(Boolean).join("_")}_${v}`,
+        deprecated: ApiVersions[v].deprecated,
+        parameters:
+          method === "get" && raw.endsWith("/items")
+            ? [qp("status", { type: "string" }, "Status"), qp("includeAcknowledged", { type: "boolean" }, "Auch bestaetigte"), qp("aggregateType", { type: "string" }, "Aggregattyp"), qp("aggregateId", { type: "string" }, "Aggregat-ID"), qp("limit", { type: "integer", minimum: 1, maximum: 1000 }, "Limit")]
+            : method === "get" && raw.endsWith("/deliveries")
+              ? [qp("notificationId", { type: "string" }, "Benachrichtigungs-ID"), qp("channel", { type: "string" }, "Kanal"), qp("limit", { type: "integer", minimum: 1, maximum: 2000 }, "Limit")]
+              : method === "get" && raw.endsWith("/escalations")
+                ? [qp("notificationId", { type: "string" }, "Benachrichtigungs-ID"), qp("limit", { type: "integer", minimum: 1, maximum: 2000 }, "Limit")]
+                : method === "get" && raw.endsWith("/audit")
+                  ? [qp("notificationId", { type: "string" }, "Benachrichtigungs-ID", true), qp("limit", { type: "integer", minimum: 1, maximum: 2000 }, "Limit")]
+                  : method === "get" && raw.endsWith("/rules")
+                    ? [qp("eventType", { type: "string" }, "Event-Typ"), qp("activeOnly", { type: "boolean" }, "Nur aktive Regeln"), qp("limit", { type: "integer", minimum: 1, maximum: 1000 }, "Limit")]
+                    : method === "get" && raw.endsWith("/quality")
+                      ? [qp("days", { type: "integer", minimum: 1, maximum: 365 }, "Zeitraum in Tagen")]
+                      : [],
+        requestBody: method === "post" ? requestBody(true, JsonObject) : undefined,
+        responses: withCommon(v, { 200: resp("Antwort", JsonObject, deprecatedHeaders(v)), 201: resp("Angelegt", JsonObject, deprecatedHeaders(v)) }),
+      }),
+    }),
+  })),
   ...["/api/approvals/requests", "/api/approvals/request", "/api/approvals/audit"].map((raw) => ({
     path: raw.replace(/^\/api/, ""),
     rawPath: raw,
@@ -704,6 +1084,156 @@ const routeCatalog = [
       }),
     }),
   })),
+  {
+    path: "/documents",
+    rawPath: "/api/documents",
+    operations: (v) => ({
+      ...op("get", {
+        tags: ["Documents"],
+        summary: "Dokumente listen",
+        operationId: `documentsList_${v}`,
+        deprecated: ApiVersions[v].deprecated,
+        parameters: [qp("docType", { type: "string" }, "Dokumenttyp"), qp("q", { type: "string" }, "Volltextsuche"), qp("limit", { type: "integer", minimum: 1, maximum: 200 }, "Maximale Anzahl")],
+        responses: withCommon(v, { 200: resp("Dokumente", JsonObject, deprecatedHeaders(v)) }),
+      }),
+    }),
+  },
+  {
+    path: "/documents/search",
+    rawPath: "/api/documents/search",
+    operations: (v) => ({
+      ...op("post", {
+        tags: ["Documents"],
+        summary: "Dokumente suchen (Volltext + Filter)",
+        operationId: `documentsSearch_${v}`,
+        deprecated: ApiVersions[v].deprecated,
+        requestBody: requestBody(true, JsonObject),
+        responses: withCommon(v, { 200: resp("Suchergebnis", JsonObject, deprecatedHeaders(v)) }),
+      }),
+    }),
+  },
+  ...[
+    "/api/documents/upload",
+    "/api/documents/document",
+    "/api/documents/versions",
+    "/api/documents/version",
+    "/api/documents/version/content",
+    "/api/documents/version/download",
+    "/api/documents/media/analysis",
+    "/api/documents/media/process",
+    "/api/documents/media/preview",
+    "/api/documents/export",
+    "/api/documents/metadata/fields",
+    "/api/documents/metadata/set",
+    "/api/documents/restore",
+    "/api/documents/signing-key",
+    "/api/documents/signing-payload",
+    "/api/documents/sign",
+    "/api/documents/signatures",
+    "/api/documents/signature/verify",
+  ].map((raw) => ({
+    path: raw.replace(/^\/api/, ""),
+    rawPath: raw,
+    operations: (v) => ({
+      ...op(
+        raw.endsWith("/upload") || raw.endsWith("/metadata/set") || raw.endsWith("/restore") || raw.endsWith("/signing-key") || raw.endsWith("/sign") || raw.endsWith("/media/process")
+          ? "post"
+          : raw.endsWith("/metadata/fields")
+            ? "get"
+            : raw.endsWith("/signing-payload") || raw.endsWith("/signatures") || raw.endsWith("/signature/verify") || raw.endsWith("/versions") || raw.endsWith("/document") || raw.endsWith("/version") || raw.endsWith("/version/content") || raw.endsWith("/version/download") || raw.endsWith("/media/analysis") || raw.endsWith("/media/preview") || raw.endsWith("/export")
+              ? "get"
+              : "post",
+        {
+          tags: ["Documents"],
+          summary:
+            raw.endsWith("/upload") ? "Dokument hochladen (Version 1)" :
+            raw.endsWith("/document") ? "Dokumentdetails lesen" :
+            raw.endsWith("/versions") ? "Versionen listen" :
+            raw.endsWith("/version") ? "Versiondetails lesen" :
+            raw.endsWith("/version/content") ? "Version anzeigen (Preview)" :
+            raw.endsWith("/version/download") ? "Version herunterladen" :
+            raw.endsWith("/media/analysis") ? "Medienanalyse lesen" :
+            raw.endsWith("/media/process") ? "Medienanalyse ausfuehren" :
+            raw.endsWith("/media/preview") ? "Medienvorschau lesen" :
+            raw.endsWith("/export") ? "Aktuelle Version exportieren" :
+            raw.endsWith("/metadata/fields") ? "Metadatenfelder lesen" :
+            raw.endsWith("/metadata/set") ? "Metadaten setzen" :
+            raw.endsWith("/restore") ? "Wiederherstellen" :
+            raw.endsWith("/signing-key") ? "Signier-Schlüssel setzen" :
+            raw.endsWith("/signing-payload") ? "Signatur-Payload abrufen" :
+            raw.endsWith("/sign") ? "Signieren" :
+            raw.endsWith("/signatures") ? "Signaturen listen" : "Signatur verifizieren",
+          operationId: `${raw.split("/").filter(Boolean).join("_")}_${v}`,
+          deprecated: ApiVersions[v].deprecated,
+          parameters:
+            raw.endsWith("/document") ? [qp("id", { type: "string" }, "Dokument-ID", true)] :
+            raw.endsWith("/versions") ? [qp("documentId", { type: "string" }, "Dokument-ID", true), qp("limit", { type: "integer", minimum: 1, maximum: 200 }, "Maximale Anzahl")] :
+            raw.endsWith("/version") ? [qp("id", { type: "string" }, "Version-ID", true)] :
+            raw.endsWith("/version/content") || raw.endsWith("/version/download") ? [qp("id", { type: "string" }, "Version-ID", true)] :
+            raw.endsWith("/media/analysis") ? [qp("versionId", { type: "string" }, "Version-ID"), qp("documentId", { type: "string" }, "Dokument-ID")] :
+            raw.endsWith("/media/preview") ? [qp("versionId", { type: "string" }, "Version-ID", true)] :
+            raw.endsWith("/export") ? [qp("documentId", { type: "string" }, "Dokument-ID", true)] :
+            raw.endsWith("/metadata/fields") ? [qp("docType", { type: "string" }, "Dokumenttyp")] :
+            raw.endsWith("/signing-payload") ? [qp("versionId", { type: "string" }, "Version-ID", true)] :
+            raw.endsWith("/signatures") ? [qp("versionId", { type: "string" }, "Version-ID", true)] :
+            raw.endsWith("/signature/verify") ? [qp("signatureId", { type: "string" }, "Signatur-ID", true)] : [],
+          requestBody:
+            raw.endsWith("/upload") || raw.endsWith("/metadata/set") || raw.endsWith("/restore") || raw.endsWith("/signing-key") || raw.endsWith("/sign") || raw.endsWith("/media/process")
+              ? requestBody(true, JsonObject)
+              : undefined,
+          responses: withCommon(v, {
+            200: raw.endsWith("/version/content") || raw.endsWith("/version/download") || raw.endsWith("/media/preview") || raw.endsWith("/export")
+              ? { description: "Binärdaten", content: { "application/octet-stream": { schema: { type: "string", format: "binary" } } } }
+              : resp("Dokumentenantwort", JsonObject, deprecatedHeaders(v)),
+            201: resp("Dokumentenantwort", JsonObject, deprecatedHeaders(v)),
+          }),
+        },
+      ),
+    }),
+  })),
+  ...[
+    "/api/mdm/scan",
+    "/api/mdm/duplicates",
+    "/api/mdm/duplicates/decide",
+    "/api/mdm/golden/merge",
+    "/api/mdm/golden",
+    "/api/mdm/issues",
+    "/api/mdm/issues/resolve",
+    "/api/mdm/model",
+    "/api/mdm/model/label",
+  ].map((raw) => ({
+    path: raw.replace(/^\/api/, ""),
+    rawPath: raw,
+    operations: (v) => ({
+      ...op(
+        raw === "/api/mdm/duplicates" || raw === "/api/mdm/golden" || raw === "/api/mdm/issues" || raw === "/api/mdm/model" ? "get" : "post",
+        {
+          tags: ["MDM"],
+          summary:
+            raw.endsWith("/scan") ? "MDM Scan (Dubletten + Qualität)" :
+            raw.endsWith("/duplicates") ? "Dubletten-Kandidaten listen" :
+            raw.endsWith("/duplicates/decide") ? "Dubletten-Kandidat entscheiden" :
+            raw.endsWith("/golden/merge") ? "Golden Record erzeugen/aktualisieren" :
+            raw.endsWith("/golden") ? "Golden Record lesen" :
+            raw.endsWith("/issues") ? "Qualitätsprobleme listen" :
+            raw.endsWith("/issues/resolve") ? "Qualitätsproblem schließen" :
+            raw.endsWith("/model") ? "Modell lesen" : "Labeln/Trainieren",
+          operationId: `${raw.split("/").filter(Boolean).join("_")}_${v}`,
+          deprecated: ApiVersions[v].deprecated,
+          parameters:
+            raw === "/api/mdm/duplicates" ? [qp("entityType", { type: "string" }, "Entity-Type", true), qp("status", { type: "string" }, "Status"), qp("limit", { type: "integer", minimum: 1, maximum: 500 }, "Limit")] :
+            raw === "/api/mdm/golden" ? [qp("entityType", { type: "string" }, "Entity-Type", true), qp("id", { type: "string" }, "Golden-ID"), qp("sourceRef", { type: "string" }, "SourceRef")] :
+            raw === "/api/mdm/issues" ? [qp("entityType", { type: "string" }, "Entity-Type"), qp("status", { type: "string" }, "Status"), qp("severity", { type: "string" }, "Severity"), qp("limit", { type: "integer", minimum: 1, maximum: 500 }, "Limit")] :
+            raw === "/api/mdm/model" ? [qp("entityType", { type: "string" }, "Entity-Type", true), qp("modelKey", { type: "string" }, "ModelKey")] : [],
+          requestBody:
+            raw === "/api/mdm/duplicates" || raw === "/api/mdm/golden" || raw === "/api/mdm/issues" || raw === "/api/mdm/model"
+              ? undefined
+              : requestBody(true, JsonObject),
+          responses: withCommon(v, { 200: resp("MDM Antwort", JsonObject, deprecatedHeaders(v)), 201: resp("MDM Antwort", JsonObject, deprecatedHeaders(v)) }),
+        },
+      ),
+    }),
+  })),
 ];
 
 function buildPaths(versionKey) {
@@ -747,6 +1277,8 @@ export function buildOpenApiSpec(versionKey = "v2") {
       { name: "Reports" },
       { name: "Import" },
       { name: "Workshop" },
+      { name: "Documents" },
+      { name: "MDM" },
     ],
     paths: buildPaths(versionKey),
     components: {

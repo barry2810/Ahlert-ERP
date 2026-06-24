@@ -1,10 +1,18 @@
 .env
 .tools/
 .local/
+.trae/
+.dbg/
 
 postgres-data/
 redis-data/
 caddy-data/
+alertmanager-data/
+grafana-data/
+loki-data/
+prometheus-data/
+promtail-data/
+tempo-data/
 
 import/
 

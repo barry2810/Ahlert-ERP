@@ -1,14 +1,17 @@
-import http from "node:http";
+import http from "http";
 import { URL, fileURLToPath, pathToFileURL } from "node:url";
 import crypto from "node:crypto";
-import https from "node:https";
+import https from "https";
 import net from "node:net";
 import tls from "node:tls";
 import fs from "node:fs";
 import readline from "node:readline";
 import path from "node:path";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import pg from "pg";
 import { ApiVersions, buildApiDocsMetrics, buildOpenApiSpec, listDocumentedRawPaths, validateOpenApiSpec } from "./openapi-specs.mjs";
+import { context as otelContext, trace as otelTrace, SpanKind, SpanStatusCode } from "@opentelemetry/api";
 
 const port = process.env.PORT ? Number(process.env.PORT) : 3000;
 const databaseUrl = process.env.DATABASE_URL || "";
@@ -19,6 +22,9 @@ const pool = databaseUrl
       connectionString: databaseUrl,
     })
   : null;
+
+const allowInsecureHeaders = process.env.ERP_ALLOW_INSECURE_HEADERS === "true";
+const execFileAsync = promisify(execFile);
 
 function migrationsDirPath() {
   const here = path.dirname(fileURLToPath(import.meta.url));
@@ -50,6 +56,11 @@ async function ensureMigrationsTable(client) {
 
 function sha256Hex(text) {
   return crypto.createHash("sha256").update(String(text)).digest("hex");
+}
+
+function sha256HexBytes(buf) {
+  const b = Buffer.isBuffer(buf) ? buf : Buffer.from(buf);
+  return crypto.createHash("sha256").update(b).digest("hex");
 }
 
 async function loadMigrationsFromDisk() {
@@ -180,7 +191,7 @@ async function runMigrations({ direction = "up", toId = null } = {}) {
 const modules = [
   { key: "dashboard", label: "Dashboard", href: "/", status: "active" },
   { key: "waste", label: "Entsorgung & Verwertung", href: "/?module=waste", status: "planned" },
-  { key: "sewage", label: "Kanal-Service", href: "/?module=sewage", status: "planned" },
+  { key: "sewage", label: "Kanal-Service", href: "/?module=sewage", status: "active" },
   { key: "fuel", label: "Brennstoffe & Energie Logistik", href: "/?module=fuel", status: "planned" },
   { key: "workshop", label: "Werkstatt", href: "/?module=workshop", status: "planned" },
 ];
@@ -269,19 +280,91 @@ const Permissions = {
   ApprovalApproveMasterdata: "APPROVAL_APPROVE_MASTERDATA",
   ApprovalApproveRouteOverrideL1: "APPROVAL_APPROVE_ROUTE_OVERRIDE_L1",
   ApprovalApproveRouteOverrideL2: "APPROVAL_APPROVE_ROUTE_OVERRIDE_L2",
+  DocumentView: "DOCUMENT_VIEW",
+  DocumentManage: "DOCUMENT_MANAGE",
+  DocumentExport: "DOCUMENT_EXPORT",
+  DocumentSign: "DOCUMENT_SIGN",
+  DocumentAdmin: "DOCUMENT_ADMIN",
+  DocumentContractView: "DOCUMENT_CONTRACT_VIEW",
+  ControllingView: "CONTROLLING_VIEW",
+  ControllingManage: "CONTROLLING_MANAGE",
+  ReportingView: "REPORTING_VIEW",
+  ReportingManage: "REPORTING_MANAGE",
+  MobileSync: "MOBILE_SYNC",
+  MdmView: "MDM_VIEW",
+  MdmManage: "MDM_MANAGE",
+  MdmAdmin: "MDM_ADMIN",
+  MdmLabel: "MDM_LABEL",
 };
 
-const allowInsecureHeaders = process.env.ERP_ALLOW_INSECURE_HEADERS === "true";
+const MainMenuCatalog = [
+  { key: "dashboard", label: "Dashboard", view: "dashboard", moduleKey: "dashboard", permissions: [] },
+  { key: "disposition", label: "Disposition", view: "disposition", moduleKey: "waste", permissions: [Permissions.WasteRouteView, Permissions.WasteRoutePlan, Permissions.WasteRouteManage, Permissions.FleetAdmin] },
+  { key: "customers", label: "Kunden", view: "customers", moduleKey: "customers", permissions: [Permissions.CustomerView, Permissions.CustomerManage, Permissions.FleetAdmin, Permissions.ViewAudit] },
+  { key: "contracts", label: "Verträge", view: "contracts", moduleKey: "contracts", permissions: [Permissions.ContractView, Permissions.ContractManage, Permissions.FleetAdmin, Permissions.ViewAudit] },
+  { key: "pricing", label: "Pricing", view: "pricing", moduleKey: "pricing", permissions: [Permissions.PricingView, Permissions.PricingManage, Permissions.FleetAdmin, Permissions.ViewAudit] },
+  { key: "pool", label: "Pool", view: "pool", moduleKey: "workshop", permissions: [Permissions.WorkshopView, Permissions.WorkshopAdmin, Permissions.WorkshopWork, Permissions.FleetAdmin] },
+  { key: "slotplan", label: "Slotplan", view: "slotplan", moduleKey: "workshop", permissions: [Permissions.WorkshopView, Permissions.WorkshopAdmin, Permissions.FleetAdmin] },
+  { key: "lager", label: "Lager", view: "lager", moduleKey: "workshop", permissions: [Permissions.InventoryView, Permissions.WorkshopAdmin, Permissions.FleetAdmin] },
+  { key: "pruefungen", label: "Prüfungen", view: "pruefungen", moduleKey: "workshop", permissions: [Permissions.WorkshopView, Permissions.WorkshopAdmin, Permissions.FleetAdmin] },
+];
+
+const BootstrapRoleCatalog = [
+  { name: "pricing_approver_l1", permissions: [Permissions.ApprovalView, Permissions.ApprovalApprovePricingL1] },
+  { name: "pricing_approver_l2", permissions: [Permissions.ApprovalView, Permissions.ApprovalApprovePricingL2] },
+  { name: "billing_approver", permissions: [Permissions.ApprovalView, Permissions.ApprovalApproveBilling] },
+  { name: "masterdata_approver", permissions: [Permissions.ApprovalView, Permissions.ApprovalApproveMasterdata] },
+  { name: "route_override_approver_l1", permissions: [Permissions.ApprovalView, Permissions.ApprovalApproveRouteOverrideL1] },
+  { name: "route_override_approver_l2", permissions: [Permissions.ApprovalView, Permissions.ApprovalApproveRouteOverrideL2] },
+  { name: "document_viewer", permissions: [Permissions.DocumentView] },
+  { name: "document_manager", permissions: [Permissions.DocumentView, Permissions.DocumentManage, Permissions.DocumentExport] },
+  { name: "document_signer", permissions: [Permissions.DocumentView, Permissions.DocumentSign] },
+  { name: "contract_viewer", permissions: [Permissions.DocumentView, Permissions.DocumentContractView] },
+  { name: "document_admin", permissions: [Permissions.DocumentAdmin, Permissions.DocumentView, Permissions.DocumentManage, Permissions.DocumentExport, Permissions.DocumentSign, Permissions.DocumentContractView] },
+  { name: "mdm_viewer", permissions: [Permissions.MdmView] },
+  { name: "mdm_steward", permissions: [Permissions.MdmView, Permissions.MdmManage, Permissions.MdmLabel, Permissions.ApprovalApproveMasterdata] },
+  { name: "mdm_admin", permissions: [Permissions.MdmAdmin, Permissions.MdmView, Permissions.MdmManage, Permissions.MdmLabel, Permissions.ApprovalApproveMasterdata] },
+  { name: "controlling_admin", permissions: [Permissions.ControllingView, Permissions.ControllingManage, Permissions.ViewAudit] },
+  { name: "reporting_analyst", permissions: [Permissions.ReportingView, Permissions.ViewAudit] },
+  { name: "reporting_admin", permissions: [Permissions.ReportingView, Permissions.ReportingManage, Permissions.ViewAudit] },
+  { name: "mobile_tech", permissions: [Permissions.MobileSync, Permissions.WorkshopView, Permissions.WorkshopCreate, Permissions.WorkshopWork] },
+];
+
+const serviceName = normalizeString(process.env.ERP_SERVICE_NAME) || normalizeString(process.env.OTEL_SERVICE_NAME) || "ahlert-erp-api";
+const deploymentEnv = normalizeString(process.env.DEPLOYMENT_ENVIRONMENT) || normalizeString(process.env.NODE_ENV) || "production";
 const tokensJson = process.env.ERP_TOKENS_JSON || "";
-const jwtSecretEnv = String(process.env.ERP_JWT_SECRET || "");
+
+function readSecret(name) {
+  const direct = process.env[name];
+  if (direct) return String(direct);
+  const file = process.env[`${name}_FILE`];
+  if (file) {
+    try {
+      return fs.readFileSync(String(file), "utf8").trim();
+    } catch {
+      return "";
+    }
+  }
+  const base64 = process.env[`${name}_BASE64`];
+  if (base64) {
+    try {
+      return Buffer.from(String(base64), "base64").toString("utf8").trim();
+    } catch {
+      return "";
+    }
+  }
+  return "";
+}
+
+const jwtSecretEnv = readSecret("ERP_JWT_SECRET");
 const jwtSecret = jwtSecretEnv || (allowInsecureHeaders ? crypto.randomBytes(32).toString("hex") : "");
 const publicBaseUrl = normalizeString(process.env.PUBLIC_BASE_URL) || `http://localhost:${port}`;
 const couplinkBaseUrl = (normalizeString(process.env.COUPLINK_BASE_URL) || "https://api.couplink.de/v1").replace(/\/+$/, "");
-const couplinkToken = String(process.env.COUPLINK_TOKEN || "").trim();
+const couplinkToken = readSecret("COUPLINK_TOKEN").trim();
 const osrmBaseUrl = normalizeString(process.env.OSRM_BASE_URL).replace(/\/+$/, "");
 const hereTrafficBaseUrl = (normalizeString(process.env.HERE_TRAFFIC_BASE_URL) || "https://data.traffic.hereapi.com/v7").replace(/\/+$/, "");
 const hereRoutingBaseUrl = (normalizeString(process.env.HERE_ROUTING_BASE_URL) || "https://router.hereapi.com/v8").replace(/\/+$/, "");
-const hereApiKey = String(process.env.HERE_API_KEY || "").trim();
+const hereApiKey = readSecret("HERE_API_KEY").trim();
 const hereMonthlyLimit = 250000;
 const hereWarnPct = process.env.HERE_WARN_PCT ? Math.max(0.1, Math.min(0.99, Number(process.env.HERE_WARN_PCT) || 0.8)) : 0.8;
 const hereCriticalPct = process.env.HERE_CRITICAL_PCT ? Math.max(hereWarnPct, Math.min(0.995, Number(process.env.HERE_CRITICAL_PCT) || 0.95)) : 0.95;
@@ -442,6 +525,42 @@ function getAuthForStream(req, url) {
   return base;
 }
 
+function getPortalAuth(req) {
+  const authHeader = String(req.headers.authorization || "");
+  if (authHeader.toLowerCase().startsWith("bearer ")) {
+    const token = authHeader.slice(7).trim();
+    const jwt = verifyJwt(token);
+    if (jwt.ok && jwt.payload && jwt.payload.typ === "portal_access") {
+      return {
+        accountId: normalizeString(jwt.payload.aid) || null,
+        portalType: normalizeString(jwt.payload.portalType) || null,
+        email: normalizeString(jwt.payload.email) || null,
+        displayName: normalizeString(jwt.payload.displayName) || null,
+        customerId: normalizeString(jwt.payload.customerId) || null,
+        supplierId: normalizeString(jwt.payload.supplierId) || null,
+        mode: "portal_jwt",
+      };
+    }
+  }
+  const cookies = parseCookies(req.headers.cookie);
+  const portalCookie = normalizeString(cookies.erp_portal_access);
+  if (portalCookie) {
+    const jwt = verifyJwt(portalCookie);
+    if (jwt.ok && jwt.payload && jwt.payload.typ === "portal_access") {
+      return {
+        accountId: normalizeString(jwt.payload.aid) || null,
+        portalType: normalizeString(jwt.payload.portalType) || null,
+        email: normalizeString(jwt.payload.email) || null,
+        displayName: normalizeString(jwt.payload.displayName) || null,
+        customerId: normalizeString(jwt.payload.customerId) || null,
+        supplierId: normalizeString(jwt.payload.supplierId) || null,
+        mode: "portal_cookie",
+      };
+    }
+  }
+  return { accountId: null, portalType: null, email: null, displayName: null, customerId: null, supplierId: null, mode: "anonymous" };
+}
+
 function parseCookies(cookieHeader) {
   const out = {};
   const raw = String(cookieHeader || "");
@@ -536,6 +655,42 @@ function issueAccessToken({ userId, username, permissions }) {
     jti: crypto.randomUUID(),
   };
   return signJwt(payload);
+}
+
+function issuePortalAccessToken(account) {
+  const a = account && typeof account === "object" ? account : {};
+  const now = Math.floor(Date.now() / 1000);
+  const exp = now + Math.max(60, Math.floor(accessTokenTtlSeconds));
+  const payload = {
+    typ: "portal_access",
+    aid: normalizeString(a.id) || null,
+    portalType: normalizeString(a.portalType) || null,
+    email: normalizeString(a.email) || null,
+    displayName: normalizeString(a.displayName) || null,
+    customerId: normalizeString(a.customerId) || null,
+    supplierId: normalizeString(a.supplierId) || null,
+    iat: now,
+    exp,
+    jti: crypto.randomUUID(),
+  };
+  return signJwt(payload);
+}
+
+function hashPortalPassword(secret) {
+  const raw = String(secret || "");
+  const salt = crypto.randomBytes(16);
+  const derived = crypto.scryptSync(raw, salt, 64);
+  return `scrypt$${base64UrlEncode(salt)}$${base64UrlEncode(derived)}`;
+}
+
+function verifyPortalPassword(secret, storedHash) {
+  const raw = String(secret || "");
+  const parts = String(storedHash || "").split("$");
+  if (parts.length !== 3 || parts[0] !== "scrypt") return false;
+  const salt = base64UrlDecode(parts[1]);
+  const expected = base64UrlDecode(parts[2]);
+  const actual = crypto.scryptSync(raw, salt, expected.length);
+  return actual.length === expected.length && crypto.timingSafeEqual(actual, expected);
 }
 
 function sha256Base64Url(text) {
@@ -1094,6 +1249,2191 @@ async function ensureBootstrapAdmin() {
   for (const p of perms) await grantPermissionToRole({ roleName, permission: p });
 }
 
+async function ensureBootstrapRoles() {
+  if (!pool) return;
+  const client = await pool.connect();
+  try {
+    await client.query(`select pg_advisory_lock(842019465);`);
+    await client.query("begin;");
+
+    const allPerms = Object.values(Permissions);
+    for (const p of allPerms) {
+      const perm = normalizeString(p);
+      if (!perm) continue;
+      await client.query(`insert into auth_permission (name) values ($1) on conflict (name) do nothing;`, [perm]);
+    }
+
+    for (const entry of BootstrapRoleCatalog) {
+      const roleName = normalizeString(entry && entry.name);
+      if (!roleName) continue;
+      const desired = Array.from(
+        new Set((Array.isArray(entry.permissions) ? entry.permissions : []).map((p) => normalizeString(p)).filter(Boolean)),
+      );
+
+      let role = await client.query(`select id, name from auth_role where name = $1 limit 1;`, [roleName]).then((r) => r.rows[0] || null);
+      if (!role) {
+        const id = `role_${crypto.randomUUID().slice(0, 18)}`;
+        await client.query(`insert into auth_role (id, name) values ($1,$2) on conflict (name) do nothing;`, [id, roleName]);
+        role = await client.query(`select id, name from auth_role where name = $1 limit 1;`, [roleName]).then((r) => r.rows[0] || null);
+        if (role) {
+          await publishErpEventTx(client, {
+            eventType: "AUTH_ROLE_BOOTSTRAP_CREATED",
+            aggregateType: "auth_role",
+            aggregateId: roleName,
+            sourceModule: "auth_bootstrap",
+            createdBy: "system",
+            payload: { roleId: role.id, roleName },
+          });
+        }
+      }
+      if (!role) continue;
+
+      const currentRows = await client
+        .query(`select permission_name from auth_role_permission where role_id = $1;`, [role.id])
+        .then((r) => r.rows)
+        .catch(() => []);
+      const current = new Set(currentRows.map((r) => normalizeString(r.permission_name)).filter(Boolean));
+      const want = new Set(desired);
+      const toAdd = desired.filter((p) => !current.has(p));
+      const toRemove = Array.from(current).filter((p) => !want.has(p));
+
+      for (const perm of toAdd) {
+        await client.query(`insert into auth_role_permission (role_id, permission_name) values ($1,$2) on conflict do nothing;`, [role.id, perm]);
+        await publishErpEventTx(client, {
+          eventType: "AUTH_ROLE_PERMISSION_BOOTSTRAP_GRANTED",
+          aggregateType: "auth_role",
+          aggregateId: roleName,
+          sourceModule: "auth_bootstrap",
+          createdBy: "system",
+          payload: { roleId: role.id, roleName, permission: perm, action: "granted" },
+        });
+      }
+      for (const perm of toRemove) {
+        await client.query(`delete from auth_role_permission where role_id = $1 and permission_name = $2;`, [role.id, perm]);
+        await publishErpEventTx(client, {
+          eventType: "AUTH_ROLE_PERMISSION_BOOTSTRAP_REVOKED",
+          aggregateType: "auth_role",
+          aggregateId: roleName,
+          sourceModule: "auth_bootstrap",
+          createdBy: "system",
+          payload: { roleId: role.id, roleName, permission: perm, action: "revoked" },
+        });
+      }
+    }
+
+    await client.query("commit;");
+  } catch {
+    try {
+      await client.query("rollback;");
+    } catch {}
+  } finally {
+    try {
+      await client.query(`select pg_advisory_unlock(842019465);`);
+    } catch {}
+    client.release();
+  }
+}
+
+function canAccessDocumentType({ auth, docType, action }) {
+  const t = normalizeDocumentType(docType);
+  if (!t) return { ok: false, error: "docType_invalid" };
+  const a = normalizeString(action).toLowerCase();
+  const isContract = t === "contract";
+  const has = (p) => auth && auth.permissions && auth.permissions.has(p);
+  const isAdmin = has(Permissions.FleetAdmin) || has(Permissions.AuthAdmin) || has(Permissions.DocumentAdmin);
+
+  if (a === "view" || a === "export") {
+    const canBase = isAdmin || has(Permissions.DocumentView) || has(Permissions.ViewAudit);
+    if (!canBase) return { ok: false, error: "forbidden" };
+    if (isContract && !(isAdmin || has(Permissions.DocumentContractView))) return { ok: false, error: "forbidden" };
+    if (a === "export" && !(isAdmin || has(Permissions.DocumentExport))) return { ok: false, error: "forbidden" };
+    return { ok: true, docType: t };
+  }
+  if (a === "manage") {
+    if (!(isAdmin || has(Permissions.DocumentManage))) return { ok: false, error: "forbidden" };
+    if (isContract && !(isAdmin || has(Permissions.DocumentContractView))) return { ok: false, error: "forbidden" };
+    return { ok: true, docType: t };
+  }
+  if (a === "sign") {
+    if (!(isAdmin || has(Permissions.DocumentSign))) return { ok: false, error: "forbidden" };
+    if (isContract && !(isAdmin || has(Permissions.DocumentContractView))) return { ok: false, error: "forbidden" };
+    return { ok: true, docType: t };
+  }
+  if (a === "admin") {
+    if (!isAdmin) return { ok: false, error: "forbidden" };
+    return { ok: true, docType: t };
+  }
+  return { ok: false, error: "action_invalid" };
+}
+
+async function listDocumentMetadataFields({ docType = null } = {}) {
+  if (!pool) return [];
+  const dt = docType ? normalizeDocumentType(docType) : null;
+  const rows = await pool
+    .query(
+      `
+      select id, doc_type, key, label, value_type, required, filterable, fulltext, created_at
+      from doc_metadata_field
+      where ($1::text is null or doc_type = $1)
+      order by doc_type asc, key asc;
+      `,
+      [dt],
+    )
+    .then((r) => r.rows)
+    .catch(() => []);
+  return rows.map((r) => ({
+    id: r.id,
+    docType: r.doc_type,
+    key: r.key,
+    label: r.label,
+    valueType: r.value_type,
+    required: r.required === true,
+    filterable: r.filterable === true,
+    fulltext: r.fulltext === true,
+    createdAt: new Date(r.created_at).toISOString(),
+  }));
+}
+
+async function createDocumentMetadataField({ docType, key, label, valueType, required = false, filterable = true, fulltext = true }) {
+  if (!pool) return { ok: false, error: "db_required" };
+  const dt = normalizeDocumentType(docType);
+  const k = normalizeKey(key);
+  const lbl = normalizeString(label);
+  const vt = normalizeString(valueType).toLowerCase();
+  if (!dt) return { ok: false, error: "docType_invalid" };
+  if (!k) return { ok: false, error: "key_invalid" };
+  if (!lbl) return { ok: false, error: "label_required" };
+  if (!["text", "number", "date", "boolean"].includes(vt)) return { ok: false, error: "valueType_invalid" };
+  const id = `dmf_${crypto.randomUUID().slice(0, 18)}`;
+  try {
+    await pool.query(
+      `
+      insert into doc_metadata_field (id, doc_type, key, label, value_type, required, filterable, fulltext)
+      values ($1,$2,$3,$4,$5,$6,$7,$8);
+      `,
+      [id, dt, k, lbl, vt, Boolean(required), Boolean(filterable), Boolean(fulltext)],
+    );
+  } catch {
+    return { ok: false, error: "field_exists" };
+  }
+  return { ok: true, item: { id, docType: dt, key: k, label: lbl, valueType: vt, required: Boolean(required), filterable: Boolean(filterable), fulltext: Boolean(fulltext) } };
+}
+
+async function upsertUserSigningKey({ userId, alg = "ed25519", publicKeyPem }) {
+  if (!pool) return { ok: false, error: "db_required" };
+  const uid = normalizeString(userId);
+  const a = normalizeString(alg).toLowerCase();
+  const pem = String(publicKeyPem || "").trim();
+  if (!uid) return { ok: false, error: "userId_required" };
+  if (!pem) return { ok: false, error: "publicKeyPem_required" };
+  if (a !== "ed25519") return { ok: false, error: "alg_unsupported" };
+  try {
+    crypto.createPublicKey(pem);
+  } catch {
+    return { ok: false, error: "publicKeyPem_invalid" };
+  }
+  await pool.query(
+    `
+    insert into auth_user_signing_key (user_id, alg, public_key_pem)
+    values ($1,$2,$3)
+    on conflict (user_id, alg) do update set public_key_pem = excluded.public_key_pem, created_at = now();
+    `,
+    [uid, a, pem],
+  );
+  return { ok: true };
+}
+
+async function getUserSigningKey({ userId, alg = "ed25519" }) {
+  if (!pool) return null;
+  const uid = normalizeString(userId);
+  const a = normalizeString(alg).toLowerCase();
+  if (!uid || !a) return null;
+  const row = await pool
+    .query(`select user_id, alg, public_key_pem, created_at from auth_user_signing_key where user_id = $1 and alg = $2 limit 1;`, [uid, a])
+    .then((r) => r.rows[0] || null)
+    .catch(() => null);
+  if (!row) return null;
+  return { userId: row.user_id, alg: row.alg, publicKeyPem: row.public_key_pem, createdAt: new Date(row.created_at).toISOString() };
+}
+
+async function getDocumentById(id) {
+  if (!pool) return null;
+  const did = normalizeString(id);
+  if (!did) return null;
+  const doc = await pool
+    .query(`select id, doc_type, title, current_version_id, created_by, created_at, updated_at from doc_document where id = $1 limit 1;`, [did])
+    .then((r) => r.rows[0] || null)
+    .catch(() => null);
+  if (!doc) return null;
+  const metaRows = await pool
+    .query(
+      `
+      select mf.key, mf.value_type, mv.value_text, mv.value_number, mv.value_date, mv.value_bool
+      from doc_metadata_value mv
+      join doc_metadata_field mf on mf.id = mv.field_id
+      where mv.document_id = $1
+      order by mf.key asc;
+      `,
+      [did],
+    )
+    .then((r) => r.rows)
+    .catch(() => []);
+  const metadata = {};
+  for (const r of metaRows) {
+    const k = r.key;
+    const vt = r.value_type;
+    if (vt === "text") metadata[k] = r.value_text;
+    else if (vt === "number") metadata[k] = r.value_number !== null ? Number(r.value_number) : null;
+    else if (vt === "date") metadata[k] = r.value_date ? String(r.value_date) : null;
+    else if (vt === "boolean") metadata[k] = r.value_bool === true;
+  }
+  return {
+    id: doc.id,
+    docType: doc.doc_type,
+    title: doc.title,
+    currentVersionId: doc.current_version_id || null,
+    createdBy: doc.created_by,
+    createdAt: new Date(doc.created_at).toISOString(),
+    updatedAt: new Date(doc.updated_at).toISOString(),
+    metadata,
+  };
+}
+
+async function getDocumentVersionById(id) {
+  if (!pool) return null;
+  const vid = normalizeString(id);
+  if (!vid) return null;
+  const row = await pool
+    .query(
+      `
+      select id, document_id, version_no, filename, mime_type, size_bytes, content_sha256, storage_backend, storage_path, comment, created_by, created_at, meta
+      from doc_version
+      where id = $1
+      limit 1;
+      `,
+      [vid],
+    )
+    .then((r) => r.rows[0] || null)
+    .catch(() => null);
+  if (!row) return null;
+  return {
+    id: row.id,
+    documentId: row.document_id,
+    versionNo: Number(row.version_no),
+    filename: row.filename || null,
+    mimeType: row.mime_type,
+    sizeBytes: Number(row.size_bytes) || 0,
+    contentSha256: row.content_sha256,
+    storageBackend: row.storage_backend,
+    storagePath: row.storage_path,
+    comment: row.comment || null,
+    createdBy: row.created_by,
+    createdAt: new Date(row.created_at).toISOString(),
+    meta: row.meta || {},
+  };
+}
+
+async function getDocumentMediaAnalysis({ versionId = null, documentId = null } = {}) {
+  if (!pool) return null;
+  const vid = normalizeString(versionId) || null;
+  const did = normalizeString(documentId) || null;
+  if (!vid && !did) return null;
+  const row = await pool
+    .query(
+      `
+      select
+        version_id, document_id, media_kind, status, ocr_text, ocr_language, preview_storage_path,
+        page_count, width_px, height_px, duration_seconds, frame_count, facts, error_text, created_at, updated_at
+      from doc_media_analysis
+      where ($1::text is null or version_id = $1)
+        and ($2::text is null or document_id = $2)
+      order by updated_at desc
+      limit 1;
+      `,
+      [vid, did],
+    )
+    .then((r) => r.rows[0] || null)
+    .catch(() => null);
+  if (!row) return null;
+  return {
+    versionId: row.version_id,
+    documentId: row.document_id,
+    mediaKind: row.media_kind,
+    status: row.status,
+    ocrText: row.ocr_text || "",
+    ocrLanguage: row.ocr_language || null,
+    previewStoragePath: row.preview_storage_path || null,
+    pageCount: row.page_count === null ? null : Number(row.page_count),
+    widthPx: row.width_px === null ? null : Number(row.width_px),
+    heightPx: row.height_px === null ? null : Number(row.height_px),
+    durationSeconds: row.duration_seconds === null ? null : Number(row.duration_seconds),
+    frameCount: row.frame_count === null ? null : Number(row.frame_count),
+    facts: row.facts || {},
+    errorText: row.error_text || null,
+    createdAt: new Date(row.created_at).toISOString(),
+    updatedAt: new Date(row.updated_at).toISOString(),
+  };
+}
+
+async function upsertDocumentMediaAnalysis({ versionId, documentId, mediaKind, status, ocrText = "", ocrLanguage = null, previewStoragePath = null, pageCount = null, widthPx = null, heightPx = null, durationSeconds = null, frameCount = null, facts = {}, errorText = null }) {
+  if (!pool) return { ok: false, error: "db_required" };
+  await pool.query(
+    `
+    insert into doc_media_analysis
+      (version_id, document_id, media_kind, status, ocr_text, ocr_language, preview_storage_path, page_count, width_px, height_px, duration_seconds, frame_count, facts, error_text, created_at, updated_at)
+    values
+      ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb,$14, now(), now())
+    on conflict (version_id) do update
+      set document_id = excluded.document_id,
+          media_kind = excluded.media_kind,
+          status = excluded.status,
+          ocr_text = excluded.ocr_text,
+          ocr_language = excluded.ocr_language,
+          preview_storage_path = excluded.preview_storage_path,
+          page_count = excluded.page_count,
+          width_px = excluded.width_px,
+          height_px = excluded.height_px,
+          duration_seconds = excluded.duration_seconds,
+          frame_count = excluded.frame_count,
+          facts = excluded.facts,
+          error_text = excluded.error_text,
+          updated_at = excluded.updated_at;
+    `,
+    [
+      normalizeString(versionId),
+      normalizeString(documentId),
+      normalizeKey(mediaKind) || "other",
+      normalizeKey(status) || "processed",
+      String(ocrText || ""),
+      normalizeString(ocrLanguage) || null,
+      previewStoragePath ? String(previewStoragePath) : null,
+      Number.isFinite(Number(pageCount)) ? Math.trunc(Number(pageCount)) : null,
+      Number.isFinite(Number(widthPx)) ? Math.trunc(Number(widthPx)) : null,
+      Number.isFinite(Number(heightPx)) ? Math.trunc(Number(heightPx)) : null,
+      Number.isFinite(Number(durationSeconds)) ? Number(durationSeconds) : null,
+      Number.isFinite(Number(frameCount)) ? Math.trunc(Number(frameCount)) : null,
+      JSON.stringify(facts && typeof facts === "object" ? facts : {}),
+      normalizeString(errorText) || null,
+    ],
+  );
+  return { ok: true };
+}
+
+async function analyzeDocumentVersion({ versionId, force = false } = {}) {
+  if (!pool) return { ok: false, error: "db_required" };
+  const vid = normalizeString(versionId);
+  if (!vid) return { ok: false, error: "versionId_required" };
+  const version = await getDocumentVersionById(vid);
+  if (!version) return { ok: false, error: "version_not_found" };
+  const existing = await getDocumentMediaAnalysis({ versionId: vid });
+  if (existing && force !== true) return { ok: true, item: existing, reused: true };
+  const mediaKind = mediaKindFromMime(version.mimeType);
+  const absPath = path.resolve(String(version.storagePath || ""));
+  if (!version.storagePath || !isDocumentStorePathSafe(absPath)) return { ok: false, error: "storage_path_forbidden" };
+  const fileExists = await fs.promises.stat(absPath).then((s) => s.isFile()).catch(() => false);
+  if (!fileExists) return { ok: false, error: "storage_not_found" };
+
+  let status = "processed";
+  let ocrText = "";
+  let previewStoragePath = null;
+  let pageCount = null;
+  let errorText = null;
+  let facts = {};
+  const probe = await probeMediaFile(absPath);
+
+  if (mediaKind === "text") {
+    ocrText = await fs.promises.readFile(absPath, "utf8").catch(() => "");
+  } else if (mediaKind === "image") {
+    const ocr = await runOcrOnImage(absPath);
+    if (!ocr.ok) {
+      status = "failed";
+      errorText = ocr.error || "ocr_failed";
+    } else {
+      ocrText = ocr.text;
+    }
+  } else if (mediaKind === "pdf") {
+    const previewPath = documentDerivedStoragePath({ documentId: version.documentId, versionId: version.id, suffix: "preview", ext: "png" });
+    const pdf = await extractPdfTextOrImage({ absPath, previewPath });
+    if (!pdf.ok) {
+      status = "failed";
+      errorText = pdf.error || "pdf_processing_failed";
+    } else {
+      ocrText = pdf.text || "";
+      pageCount = pdf.pageCount;
+      previewStoragePath = pdf.previewStoragePath || null;
+    }
+  } else if (mediaKind === "video") {
+    const previewPath = documentDerivedStoragePath({ documentId: version.documentId, versionId: version.id, suffix: "preview", ext: "png" });
+    const preview = await extractVideoPreview({ absPath, previewPath });
+    if (!preview.ok) {
+      status = "failed";
+      errorText = preview.error || "video_preview_failed";
+    } else {
+      previewStoragePath = preview.previewStoragePath || null;
+      const ocr = await runOcrOnImage(previewStoragePath);
+      if (ocr.ok) ocrText = ocr.text;
+    }
+  } else {
+    status = "skipped";
+    errorText = "media_kind_not_supported";
+  }
+
+  facts = {
+    mediaKind,
+    hasOcrText: Boolean(normalizeString(ocrText)),
+    ocrChars: String(ocrText || "").length,
+    previewAvailable: Boolean(previewStoragePath),
+    widthPx: probe.widthPx ?? null,
+    heightPx: probe.heightPx ?? null,
+    durationSeconds: probe.durationSeconds ?? null,
+    frameCount: probe.frameCount ?? null,
+    relevantUseCases: ["kanalinspektion", "schadensnachweis", "belegverarbeitung"],
+  };
+
+  await upsertDocumentMediaAnalysis({
+    versionId: version.id,
+    documentId: version.documentId,
+    mediaKind,
+    status,
+    ocrText,
+    ocrLanguage: status === "processed" && mediaKind !== "video" && mediaKind !== "other" ? docOcrLanguages : mediaKind === "video" ? docOcrLanguages : null,
+    previewStoragePath,
+    pageCount,
+    widthPx: probe.widthPx ?? null,
+    heightPx: probe.heightPx ?? null,
+    durationSeconds: probe.durationSeconds ?? null,
+    frameCount: probe.frameCount ?? null,
+    facts,
+    errorText,
+  });
+  const item = await getDocumentMediaAnalysis({ versionId: version.id });
+  return { ok: true, item };
+}
+
+async function listDocuments({ docType = null, q = null, limit = 50 } = {}) {
+  if (!pool) return [];
+  const dt = docType ? normalizeDocumentType(docType) : null;
+  const query = normalizeString(q) || null;
+  const n = Math.max(1, Math.min(200, Number(limit) || 50));
+  const rows = await pool
+    .query(
+      `
+      select d.id, d.doc_type, d.title, d.current_version_id, d.created_by, d.created_at, d.updated_at
+      from doc_document d
+      where ($1::text is null or d.doc_type = $1)
+        and ($2::text is null or d.search_tsv @@ plainto_tsquery('simple', $2))
+      order by d.updated_at desc
+      limit $3;
+      `,
+      [dt, query, n],
+    )
+    .then((r) => r.rows)
+    .catch(() => []);
+  return rows.map((r) => ({
+    id: r.id,
+    docType: r.doc_type,
+    title: r.title,
+    currentVersionId: r.current_version_id || null,
+    createdBy: r.created_by,
+    createdAt: new Date(r.created_at).toISOString(),
+    updatedAt: new Date(r.updated_at).toISOString(),
+  }));
+}
+
+async function listDocumentVersions({ documentId, limit = 50 } = {}) {
+  if (!pool) return [];
+  const did = normalizeString(documentId);
+  const n = Math.max(1, Math.min(200, Number(limit) || 50));
+  if (!did) return [];
+  const rows = await pool
+    .query(
+      `
+      select id, document_id, version_no, filename, mime_type, size_bytes, content_sha256, comment, created_by, created_at, meta
+      from doc_version
+      where document_id = $1
+      order by version_no desc
+      limit $2;
+      `,
+      [did, n],
+    )
+    .then((r) => r.rows)
+    .catch(() => []);
+  return rows.map((r) => ({
+    id: r.id,
+    documentId: r.document_id,
+    versionNo: Number(r.version_no),
+    filename: r.filename || null,
+    mimeType: r.mime_type,
+    sizeBytes: Number(r.size_bytes) || 0,
+    contentSha256: r.content_sha256,
+    comment: r.comment || null,
+    createdBy: r.created_by,
+    createdAt: new Date(r.created_at).toISOString(),
+    meta: r.meta || {},
+  }));
+}
+
+async function searchDocuments({ auth, docType = null, q = null, filters = [], limit = 50 } = {}) {
+  if (!pool) return [];
+  const dt = docType ? normalizeDocumentType(docType) : null;
+  const query = normalizeString(q) || null;
+  const n = Math.max(1, Math.min(200, Number(limit) || 50));
+
+  const allowContracts = canAccessDocumentType({ auth, docType: "contract", action: "view" }).ok;
+  const baseWhere = [];
+  const params = [];
+  const add = (sql, val) => {
+    params.push(val);
+    baseWhere.push(sql.replaceAll("?", `$${params.length}`));
+  };
+  if (dt) add("d.doc_type = ?", dt);
+  else if (!allowContracts) baseWhere.push(`d.doc_type <> 'contract'`);
+  if (query) add("d.search_tsv @@ plainto_tsquery('simple', ?)", query);
+
+  const fList = Array.isArray(filters) ? filters : [];
+  const normFilters = [];
+  for (const f of fList) {
+    if (!f || typeof f !== "object") continue;
+    const key = normalizeKey(f.key);
+    const op = normalizeString(f.op).toLowerCase() || "eq";
+    const value = f.value;
+    if (!key) continue;
+    if (!["eq", "contains", "gte", "lte"].includes(op)) continue;
+    normFilters.push({ key, op, value });
+  }
+
+  const fields = dt
+    ? await pool.query(`select id, key, value_type from doc_metadata_field where doc_type = $1;`, [dt]).then((r) => r.rows).catch(() => [])
+    : await pool.query(`select id, key, value_type from doc_metadata_field;`).then((r) => r.rows).catch(() => []);
+  const fieldByKey = new Map(fields.map((r) => [String(r.key), { id: String(r.id), valueType: String(r.value_type) }]));
+
+  const joins = [];
+  for (let i = 0; i < normFilters.length; i += 1) {
+    const f = normFilters[i];
+    const def = fieldByKey.get(f.key) || null;
+    if (!def) throw new Error(`metadata_field_unknown:${f.key}`);
+    const alias = `mv${i + 1}`;
+    const cond = [];
+    const localParams = [];
+    const addLocal = (sql, val) => {
+      localParams.push(val);
+      cond.push(sql.replaceAll("?", `$${params.length + localParams.length}`));
+    };
+    addLocal(`${alias}.field_id = ?`, def.id);
+    if (def.valueType === "text") {
+      if (f.op === "eq") addLocal(`${alias}.value_text = ?`, normalizeString(f.value) || "");
+      if (f.op === "contains") addLocal(`${alias}.value_text ilike ?`, `%${normalizeString(f.value)}%`);
+    } else if (def.valueType === "number") {
+      const num = Number(f.value);
+      if (!Number.isFinite(num)) throw new Error(`filter_value_invalid:${f.key}`);
+      if (f.op === "eq") addLocal(`${alias}.value_number = ?`, num);
+      if (f.op === "gte") addLocal(`${alias}.value_number >= ?`, num);
+      if (f.op === "lte") addLocal(`${alias}.value_number <= ?`, num);
+    } else if (def.valueType === "date") {
+      const v = normalizeString(f.value);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) throw new Error(`filter_value_invalid:${f.key}`);
+      if (f.op === "eq") addLocal(`${alias}.value_date = ?`, v);
+      if (f.op === "gte") addLocal(`${alias}.value_date >= ?`, v);
+      if (f.op === "lte") addLocal(`${alias}.value_date <= ?`, v);
+    } else if (def.valueType === "boolean") {
+      const b = f.value === true || f.value === "true" || f.value === 1 || f.value === "1";
+      if (f.op !== "eq") throw new Error(`filter_op_invalid:${f.key}`);
+      addLocal(`${alias}.value_bool = ?`, b);
+    }
+    joins.push(`join doc_metadata_value ${alias} on ${alias}.document_id = d.id and ${cond.join(" and ")}`);
+    params.push(...localParams);
+  }
+
+  const whereSql = baseWhere.length ? `where ${baseWhere.join(" and ")}` : "";
+  const joinSql = joins.length ? `\n${joins.join("\n")}\n` : "\n";
+  const sql = `
+    select d.id, d.doc_type, d.title, d.current_version_id, d.created_by, d.created_at, d.updated_at
+    from doc_document d
+    ${joinSql}
+    ${whereSql}
+    order by d.updated_at desc
+    limit $${params.length + 1};
+  `;
+  const rows = await pool.query(sql, [...params, n]).then((r) => r.rows).catch(() => []);
+  return rows.map((r) => ({
+    id: r.id,
+    docType: r.doc_type,
+    title: r.title,
+    currentVersionId: r.current_version_id || null,
+    createdBy: r.created_by,
+    createdAt: new Date(r.created_at).toISOString(),
+    updatedAt: new Date(r.updated_at).toISOString(),
+  }));
+}
+
+async function setDocumentMetadata({ documentId, docType, metadata, updatedBy }) {
+  if (!pool) return { ok: false, error: "db_required" };
+  const did = normalizeString(documentId);
+  const dt = normalizeDocumentType(docType);
+  const u = normalizeString(updatedBy);
+  const meta = metadata && typeof metadata === "object" ? metadata : null;
+  if (!did) return { ok: false, error: "documentId_required" };
+  if (!dt) return { ok: false, error: "docType_invalid" };
+  if (!u) return { ok: false, error: "username_required" };
+  if (!meta) return { ok: false, error: "metadata_required" };
+
+  const fields = await pool
+    .query(`select id, key, value_type, required from doc_metadata_field where doc_type = $1;`, [dt])
+    .then((r) => r.rows)
+    .catch(() => []);
+  const byKey = new Map(fields.map((f) => [String(f.key), f]));
+
+  const requiredKeys = fields.filter((f) => f.required === true).map((f) => String(f.key));
+  if (requiredKeys.length) {
+    const requiredRows = await pool
+      .query(
+        `
+        select mf.key, mf.value_type, mv.value_text, mv.value_number, mv.value_date, mv.value_bool
+        from doc_metadata_field mf
+        left join doc_metadata_value mv on mv.field_id = mf.id and mv.document_id = $1
+        where mf.doc_type = $2 and mf.required = true;
+        `,
+        [did, dt],
+      )
+      .then((r) => r.rows)
+      .catch(() => []);
+    for (const r of requiredRows) {
+      const k = String(r.key);
+      const incoming = meta[k];
+      const vt = String(r.value_type);
+      const hasIncoming = incoming !== undefined;
+      const eff =
+        vt === "text"
+          ? (hasIncoming ? normalizeString(incoming) : normalizeString(r.value_text)) || null
+          : vt === "number"
+            ? (hasIncoming ? (incoming === null || incoming === "" ? null : Number(incoming)) : (r.value_number !== null ? Number(r.value_number) : null))
+            : vt === "date"
+              ? (hasIncoming ? normalizeString(incoming) : (r.value_date ? String(r.value_date) : null))
+              : (hasIncoming ? (incoming === true || incoming === "true" || incoming === 1 || incoming === "1") : (r.value_bool === true));
+      if (vt === "text" && !eff) return { ok: false, error: `missing_required_metadata:${k}` };
+      if (vt === "number" && (eff === null || !Number.isFinite(eff))) return { ok: false, error: `missing_required_metadata:${k}` };
+      if (vt === "date" && (!eff || !/^\d{4}-\d{2}-\d{2}$/.test(eff))) return { ok: false, error: `missing_required_metadata:${k}` };
+      if (vt === "boolean" && eff !== true && eff !== false) return { ok: false, error: `missing_required_metadata:${k}` };
+    }
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query("begin;");
+    for (const [kRaw, v] of Object.entries(meta)) {
+      const k = normalizeKey(kRaw);
+      if (!k) continue;
+      const f = byKey.get(k) || null;
+      if (!f) return { ok: false, error: `metadata_field_unknown:${k}` };
+      const vt = String(f.value_type);
+      let valueText = null;
+      let valueNumber = null;
+      let valueDate = null;
+      let valueBool = null;
+      if (vt === "text") valueText = normalizeString(v) || null;
+      else if (vt === "number") valueNumber = v === null || v === "" ? null : Number(v);
+      else if (vt === "date") valueDate = v ? String(v) : null;
+      else if (vt === "boolean") valueBool = v === true || v === "true" || v === 1 || v === "1";
+      await client.query(
+        `
+        insert into doc_metadata_value (document_id, field_id, value_text, value_number, value_date, value_bool, updated_by, updated_at)
+        values ($1,$2,$3,$4,$5,$6,$7, now())
+        on conflict (document_id, field_id) do update
+          set value_text = excluded.value_text,
+              value_number = excluded.value_number,
+              value_date = excluded.value_date,
+              value_bool = excluded.value_bool,
+              updated_by = excluded.updated_by,
+              updated_at = excluded.updated_at;
+        `,
+        [did, f.id, valueText, Number.isFinite(valueNumber) ? valueNumber : null, valueDate, valueBool, u],
+      );
+    }
+    await client.query("commit;");
+  } catch (e) {
+    try {
+      await client.query("rollback;");
+    } catch {}
+    return { ok: false, error: "metadata_update_failed" };
+  } finally {
+    client.release();
+  }
+  await publishErpEvent({
+    eventType: "DOCUMENT_METADATA_UPDATED",
+    aggregateType: "document",
+    aggregateId: did,
+    createdBy: u,
+    payload: { documentId: did, docType: dt, keys: Object.keys(meta).map((k) => normalizeKey(k)).filter(Boolean) },
+  });
+  return { ok: true };
+}
+
+async function createDocumentWithInitialVersion({ docType, title, filename = null, mimeType, contentBase64, comment = null, createdBy, metadata = {} }) {
+  if (!pool) return { ok: false, error: "db_required" };
+  const dt = normalizeDocumentType(docType);
+  const t = normalizeString(title);
+  const mt = normalizeMimeType(mimeType);
+  const u = normalizeString(createdBy);
+  if (!dt) return { ok: false, error: "docType_invalid" };
+  if (!t) return { ok: false, error: "title_required" };
+  if (!mt) return { ok: false, error: "mimeType_invalid" };
+  if (!u) return { ok: false, error: "username_required" };
+  const allowed = allowedMimeForDocumentType(dt);
+  if (allowed.length && !allowed.includes(mt)) return { ok: false, error: "mimeType_not_allowed" };
+  const decoded = decodeBase64ToBuffer(contentBase64);
+  if (!decoded) return { ok: false, error: "contentBase64_invalid" };
+  if (decoded.error) return { ok: false, error: decoded.error };
+  const buf = decoded.buf;
+  const sha = sha256HexBytes(buf);
+
+  const documentId = `doc_${crypto.randomUUID().slice(0, 18)}`;
+  const versionId = `dver_${crypto.randomUUID().slice(0, 18)}`;
+  const storagePath = documentStoragePath({ documentId, versionId, mimeType: mt });
+  if (!storagePath) return { ok: false, error: "storage_path_invalid" };
+  await writeFileAtomic(storagePath, buf);
+
+  const client = await pool.connect();
+  try {
+    await client.query("begin;");
+    await client.query(
+      `
+      insert into doc_document (id, doc_type, title, current_version_id, created_by)
+      values ($1,$2,$3,null,$4);
+      `,
+      [documentId, dt, t, u],
+    );
+    await client.query(
+      `
+      insert into doc_version
+        (id, document_id, version_no, filename, mime_type, size_bytes, content_sha256, storage_backend, storage_path, comment, created_by, meta)
+      values
+        ($1,$2,1,$3,$4,$5,$6,'fs',$7,$8,$9,'{}'::jsonb);
+      `,
+      [versionId, documentId, normalizeString(filename) || null, mt, buf.length, sha, storagePath, normalizeString(comment) || null, u],
+    );
+    await client.query(`update doc_document set current_version_id = $2, updated_at = now() where id = $1;`, [documentId, versionId]);
+    await client.query("commit;");
+  } catch (e) {
+    try {
+      await client.query("rollback;");
+    } catch {}
+    return { ok: false, error: "document_create_failed" };
+  } finally {
+    client.release();
+  }
+
+  const metaRes = await setDocumentMetadata({ documentId, docType: dt, metadata, updatedBy: u });
+  if (!metaRes.ok && metaRes.error && !String(metaRes.error).startsWith("metadata_field_unknown:") && !String(metaRes.error).startsWith("missing_required_metadata:")) {
+    return { ok: false, error: metaRes.error };
+  }
+  if (!metaRes.ok) return metaRes;
+
+  await publishErpEvent({
+    eventType: "DOCUMENT_CREATED",
+    aggregateType: "document",
+    aggregateId: documentId,
+    createdBy: u,
+    payload: { documentId, docType: dt, title: t, versionId, versionNo: 1, mimeType: mt, sizeBytes: buf.length, contentSha256: sha },
+  });
+  await publishErpEvent({
+    eventType: "DOCUMENT_VERSION_ADDED",
+    aggregateType: "document",
+    aggregateId: documentId,
+    createdBy: u,
+    payload: { documentId, docType: dt, versionId, versionNo: 1, mimeType: mt, sizeBytes: buf.length, contentSha256: sha, comment: normalizeString(comment) || null },
+  });
+  const analysis = await analyzeDocumentVersion({ versionId }).catch(() => null);
+  return { ok: true, documentId, versionId, mediaAnalysis: analysis && analysis.ok ? analysis.item : null };
+}
+
+async function addDocumentVersion({ documentId, mimeType, contentBase64, comment = null, createdBy, filename = null }) {
+  if (!pool) return { ok: false, error: "db_required" };
+  const did = normalizeString(documentId);
+  const mt = normalizeMimeType(mimeType);
+  const u = normalizeString(createdBy);
+  if (!did) return { ok: false, error: "documentId_required" };
+  if (!mt) return { ok: false, error: "mimeType_invalid" };
+  if (!u) return { ok: false, error: "username_required" };
+  const doc = await pool.query(`select id, doc_type from doc_document where id = $1 limit 1;`, [did]).then((r) => r.rows[0] || null).catch(() => null);
+  if (!doc) return { ok: false, error: "document_not_found" };
+  const allowed = allowedMimeForDocumentType(doc.doc_type);
+  if (allowed.length && !allowed.includes(mt)) return { ok: false, error: "mimeType_not_allowed" };
+  const decoded = decodeBase64ToBuffer(contentBase64);
+  if (!decoded) return { ok: false, error: "contentBase64_invalid" };
+  if (decoded.error) return { ok: false, error: decoded.error };
+  const buf = decoded.buf;
+  const sha = sha256HexBytes(buf);
+  const versionId = `dver_${crypto.randomUUID().slice(0, 18)}`;
+  const storagePath = documentStoragePath({ documentId: did, versionId, mimeType: mt });
+  if (!storagePath) return { ok: false, error: "storage_path_invalid" };
+  await writeFileAtomic(storagePath, buf);
+
+  const client = await pool.connect();
+  let nextNo = 1;
+  try {
+    await client.query("begin;");
+    const maxRow = await client.query(`select coalesce(max(version_no), 0)::int as n from doc_version where document_id = $1;`, [did]).then((r) => r.rows[0] || null);
+    nextNo = (maxRow?.n || 0) + 1;
+    await client.query(
+      `
+      insert into doc_version
+        (id, document_id, version_no, filename, mime_type, size_bytes, content_sha256, storage_backend, storage_path, comment, created_by, meta)
+      values
+        ($1,$2,$3,$4,$5,$6,$7,'fs',$8,$9,$10,'{}'::jsonb);
+      `,
+      [versionId, did, nextNo, normalizeString(filename) || null, mt, buf.length, sha, storagePath, normalizeString(comment) || null, u],
+    );
+    await client.query(`update doc_document set current_version_id = $2, updated_at = now() where id = $1;`, [did, versionId]);
+    await client.query("commit;");
+  } catch {
+    try {
+      await client.query("rollback;");
+    } catch {}
+    return { ok: false, error: "version_add_failed" };
+  } finally {
+    client.release();
+  }
+
+  await publishErpEvent({
+    eventType: "DOCUMENT_VERSION_ADDED",
+    aggregateType: "document",
+    aggregateId: did,
+    createdBy: u,
+    payload: { documentId: did, versionId, versionNo: nextNo, mimeType: mt, sizeBytes: buf.length, contentSha256: sha, comment: normalizeString(comment) || null },
+  });
+  const analysis = await analyzeDocumentVersion({ versionId }).catch(() => null);
+  return { ok: true, documentId: did, versionId, versionNo: nextNo, mediaAnalysis: analysis && analysis.ok ? analysis.item : null };
+}
+
+async function restoreDocumentVersion({ documentId, versionId, createdBy, comment = null }) {
+  if (!pool) return { ok: false, error: "db_required" };
+  const did = normalizeString(documentId);
+  const fromVid = normalizeString(versionId);
+  const u = normalizeString(createdBy);
+  if (!did) return { ok: false, error: "documentId_required" };
+  if (!fromVid) return { ok: false, error: "versionId_required" };
+  if (!u) return { ok: false, error: "username_required" };
+  const from = await pool
+    .query(`select id, document_id, mime_type, size_bytes, content_sha256, storage_backend, storage_path, filename from doc_version where id = $1 and document_id = $2 limit 1;`, [fromVid, did])
+    .then((r) => r.rows[0] || null)
+    .catch(() => null);
+  if (!from) return { ok: false, error: "version_not_found" };
+
+  const client = await pool.connect();
+  let nextNo = 1;
+  const newVid = `dver_${crypto.randomUUID().slice(0, 18)}`;
+  try {
+    await client.query("begin;");
+    const maxRow = await client.query(`select coalesce(max(version_no), 0)::int as n from doc_version where document_id = $1;`, [did]).then((r) => r.rows[0] || null);
+    nextNo = (maxRow?.n || 0) + 1;
+    await client.query(
+      `
+      insert into doc_version
+        (id, document_id, version_no, filename, mime_type, size_bytes, content_sha256, storage_backend, storage_path, comment, created_by, meta)
+      values
+        ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb);
+      `,
+      [
+        newVid,
+        did,
+        nextNo,
+        from.filename || null,
+        from.mime_type,
+        Number(from.size_bytes) || 0,
+        from.content_sha256,
+        from.storage_backend,
+        from.storage_path,
+        normalizeString(comment) || `restore_from:${fromVid}`,
+        u,
+        JSON.stringify({ restoredFromVersionId: fromVid }),
+      ],
+    );
+    await client.query(`update doc_document set current_version_id = $2, updated_at = now() where id = $1;`, [did, newVid]);
+    await client.query("commit;");
+  } catch {
+    try {
+      await client.query("rollback;");
+    } catch {}
+    return { ok: false, error: "restore_failed" };
+  } finally {
+    client.release();
+  }
+
+  await publishErpEvent({
+    eventType: "DOCUMENT_RESTORED",
+    aggregateType: "document",
+    aggregateId: did,
+    createdBy: u,
+    payload: { documentId: did, restoredFromVersionId: fromVid, newVersionId: newVid, newVersionNo: nextNo },
+  });
+  return { ok: true, documentId: did, versionId: newVid, versionNo: nextNo };
+}
+
+async function listDocumentSignatures({ versionId }) {
+  if (!pool) return [];
+  const vid = normalizeString(versionId);
+  if (!vid) return [];
+  const rows = await pool
+    .query(
+      `
+      select id, version_id, signed_by_user_id, signed_by_username, alg, signature_base64, signing_payload_sha256, signed_at, meta
+      from doc_signature
+      where version_id = $1
+      order by signed_at desc;
+      `,
+      [vid],
+    )
+    .then((r) => r.rows)
+    .catch(() => []);
+  return rows.map((r) => ({
+    id: r.id,
+    versionId: r.version_id,
+    signedByUserId: r.signed_by_user_id || null,
+    signedByUsername: r.signed_by_username,
+    alg: r.alg,
+    signatureBase64: r.signature_base64,
+    signingPayloadSha256: r.signing_payload_sha256,
+    signedAt: new Date(r.signed_at).toISOString(),
+    meta: r.meta || {},
+  }));
+}
+
+async function verifyAndStoreDocumentSignature({ versionId, auth, alg = "ed25519", signatureBase64, meta = {} }) {
+  if (!pool) return { ok: false, error: "db_required" };
+  const vid = normalizeString(versionId);
+  const u = auth && typeof auth.username === "string" ? normalizeString(auth.username) : null;
+  if (!vid) return { ok: false, error: "versionId_required" };
+  if (!u) return { ok: false, error: "unauthorized" };
+  const a = normalizeString(alg).toLowerCase();
+  if (a !== "ed25519") return { ok: false, error: "alg_unsupported" };
+  const sigB64 = normalizeString(signatureBase64);
+  if (!sigB64) return { ok: false, error: "signatureBase64_required" };
+  let sigBuf;
+  try {
+    sigBuf = Buffer.from(sigB64, "base64");
+  } catch {
+    sigBuf = null;
+  }
+  if (!sigBuf || !sigBuf.length) return { ok: false, error: "signatureBase64_invalid" };
+
+  const ver = await getDocumentVersionById(vid);
+  if (!ver) return { ok: false, error: "version_not_found" };
+  const doc = await pool.query(`select doc_type from doc_document where id = $1 limit 1;`, [ver.documentId]).then((r) => r.rows[0] || null).catch(() => null);
+  const access = canAccessDocumentType({ auth, docType: doc?.doc_type || null, action: "sign" });
+  if (!access.ok) return access;
+
+  const userId = await resolveAuthUserId(auth);
+  if (!userId) return { ok: false, error: "user_not_in_db" };
+  const key = await getUserSigningKey({ userId, alg: a });
+  if (!key) return { ok: false, error: "signing_key_missing" };
+
+  const payloadText = buildDocumentSigningPayloadText({
+    versionId: ver.id,
+    contentSha256: ver.contentSha256,
+    createdAt: ver.createdAt,
+    mimeType: ver.mimeType,
+    sizeBytes: ver.sizeBytes,
+  });
+  if (!payloadText) return { ok: false, error: "signing_payload_invalid" };
+  const payloadSha = sha256HexBytes(Buffer.from(payloadText, "utf8"));
+
+  let ok = false;
+  try {
+    const pub = crypto.createPublicKey(key.publicKeyPem);
+    ok = crypto.verify(null, Buffer.from(payloadText, "utf8"), pub, sigBuf);
+  } catch {
+    ok = false;
+  }
+  if (!ok) return { ok: false, error: "signature_invalid" };
+
+  const id = `dsig_${crypto.randomUUID().slice(0, 18)}`;
+  const metaOut = meta && typeof meta === "object" ? { ...meta } : {};
+  if (!metaOut.publicKeyPem) metaOut.publicKeyPem = key.publicKeyPem;
+  try {
+    await pool.query(
+      `
+      insert into doc_signature
+        (id, version_id, signed_by_user_id, signed_by_username, alg, signature_base64, signing_payload_sha256, meta)
+      values
+        ($1,$2,$3,$4,$5,$6,$7,$8::jsonb);
+      `,
+      [id, ver.id, userId, u, a, sigB64, payloadSha, JSON.stringify(metaOut)],
+    );
+  } catch {
+    return { ok: false, error: "signature_exists" };
+  }
+  await publishErpEvent({
+    eventType: "DOCUMENT_SIGNED",
+    aggregateType: "document",
+    aggregateId: ver.documentId,
+    createdBy: u,
+    payload: { documentId: ver.documentId, versionId: ver.id, signedBy: u, alg: a, signingPayloadSha256: payloadSha },
+  });
+  return { ok: true, id, versionId: ver.id, documentId: ver.documentId, signedBy: u, alg: a, signingPayloadSha256: payloadSha };
+}
+
+async function ensureSystemAuthUserForUsername(username) {
+  if (!pool) return null;
+  const u = normalizeString(username);
+  if (!u) return null;
+  const existing = await pool.query(`select id from auth_user where username = $1 limit 1;`, [u]).then((r) => r.rows[0] || null).catch(() => null);
+  if (existing && existing.id) return String(existing.id);
+  const id = `usr_${crypto.randomUUID().slice(0, 18)}`;
+  await pool
+    .query(
+      `
+      insert into auth_user
+        (id, username, display_name, password_alg, password_salt, password_hash, password_params, disabled, created_at, updated_at)
+      values
+        ($1,$2,$3,'system','', '', '{}'::jsonb, false, now(), now())
+      on conflict (username) do nothing;
+      `,
+      [id, u, u],
+    )
+    .catch(() => {});
+  const row = await pool.query(`select id from auth_user where username = $1 limit 1;`, [u]).then((r) => r.rows[0] || null).catch(() => null);
+  return row && row.id ? String(row.id) : null;
+}
+
+async function getDocumentSignatureById(id) {
+  if (!pool) return null;
+  const sid = normalizeString(id);
+  if (!sid) return null;
+  const row = await pool
+    .query(
+      `
+      select id, version_id, signed_by_user_id, signed_by_username, alg, signature_base64, signing_payload_sha256, signed_at, meta
+      from doc_signature
+      where id = $1
+      limit 1;
+      `,
+      [sid],
+    )
+    .then((r) => r.rows[0] || null)
+    .catch(() => null);
+  if (!row) return null;
+  return {
+    id: row.id,
+    versionId: row.version_id,
+    signedByUserId: row.signed_by_user_id || null,
+    signedByUsername: row.signed_by_username,
+    alg: row.alg,
+    signatureBase64: row.signature_base64,
+    signingPayloadSha256: row.signing_payload_sha256,
+    signedAt: new Date(row.signed_at).toISOString(),
+    meta: row.meta || {},
+  };
+}
+
+async function verifyDocumentSignature({ signatureId }) {
+  if (!pool) return { ok: false, error: "db_required" };
+  const sig = await getDocumentSignatureById(signatureId);
+  if (!sig) return { ok: false, error: "signature_not_found" };
+  const ver = await getDocumentVersionById(sig.versionId);
+  if (!ver) return { ok: false, error: "version_not_found" };
+  const payloadText = buildDocumentSigningPayloadText({
+    versionId: ver.id,
+    contentSha256: ver.contentSha256,
+    createdAt: ver.createdAt,
+    mimeType: ver.mimeType,
+    sizeBytes: ver.sizeBytes,
+  });
+  if (!payloadText) return { ok: true, valid: false, reason: "signing_payload_invalid" };
+  const payloadSha = sha256HexBytes(Buffer.from(payloadText, "utf8"));
+  if (payloadSha !== sig.signingPayloadSha256) return { ok: true, valid: false, reason: "payload_hash_mismatch" };
+  const a = normalizeString(sig.alg).toLowerCase();
+  if (a !== "ed25519") return { ok: true, valid: false, reason: "alg_unsupported" };
+  let sigBuf;
+  try {
+    sigBuf = Buffer.from(String(sig.signatureBase64 || ""), "base64");
+  } catch {
+    sigBuf = null;
+  }
+  if (!sigBuf || !sigBuf.length) return { ok: true, valid: false, reason: "signature_invalid" };
+  const pem = normalizeString(sig.meta?.publicKeyPem) || null;
+  if (!pem) return { ok: true, valid: false, reason: "public_key_missing" };
+  try {
+    const pub = crypto.createPublicKey(pem);
+    const ok = crypto.verify(null, Buffer.from(payloadText, "utf8"), pub, sigBuf);
+    return { ok: true, valid: ok, reason: ok ? "ok" : "signature_invalid" };
+  } catch {
+    return { ok: true, valid: false, reason: "public_key_invalid" };
+  }
+}
+
+async function buildSigningPayloadForVersion({ versionId }) {
+  const ver = await getDocumentVersionById(versionId);
+  if (!ver) return null;
+  const payloadText = buildDocumentSigningPayloadText({
+    versionId: ver.id,
+    contentSha256: ver.contentSha256,
+    createdAt: ver.createdAt,
+    mimeType: ver.mimeType,
+    sizeBytes: ver.sizeBytes,
+  });
+  if (!payloadText) return null;
+  const payloadSha = sha256HexBytes(Buffer.from(payloadText, "utf8"));
+  return { versionId: ver.id, documentId: ver.documentId, payloadText, signingPayloadSha256: payloadSha };
+}
+
+const MdmEntityTypes = new Set(["customer", "contract", "material", "item", "site"]);
+
+function normalizeMdmEntityType(value) {
+  const v = normalizeString(value).toLowerCase();
+  if (!v || !MdmEntityTypes.has(v)) return null;
+  return v;
+}
+
+function normalizeEmail(value) {
+  const v = normalizeString(value).toLowerCase();
+  if (!v) return null;
+  if (v.length > 320) return null;
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(v)) return null;
+  return v;
+}
+
+function normalizePhone(value) {
+  const raw = normalizeString(value);
+  if (!raw) return null;
+  const digits = raw.replace(/[^\d+]/g, "");
+  const norm = digits.startsWith("00") ? `+${digits.slice(2)}` : digits;
+  const out = norm.replace(/[^\d+]/g, "");
+  const d = out.replace(/[^\d]/g, "");
+  if (d.length < 7 || d.length > 18) return null;
+  return out;
+}
+
+function normalizeVatId(value) {
+  const v = normalizeString(value).toUpperCase().replace(/[^A-Z0-9]/g, "");
+  if (!v) return null;
+  if (v.length < 6 || v.length > 20) return null;
+  return v;
+}
+
+function normalizeName(value) {
+  const v = normalizeString(value).toLowerCase();
+  if (!v) return null;
+  return v
+    .replace(/&/g, " und ")
+    .replace(/[().,;:/\\'"`]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function normalizeAddressText(value) {
+  const v = normalizeString(value).toLowerCase();
+  if (!v) return null;
+  return v
+    .replace(/[().,;:/\\'"`]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function soundex(value) {
+  const v = normalizeName(value);
+  if (!v) return null;
+  const s = v.replace(/[^a-z]/g, "");
+  if (!s) return null;
+  const first = s[0].toUpperCase();
+  const map = (c) => {
+    if ("bfpv".includes(c)) return "1";
+    if ("cgjkqsxz".includes(c)) return "2";
+    if ("dt".includes(c)) return "3";
+    if ("l".includes(c)) return "4";
+    if ("mn".includes(c)) return "5";
+    if ("r".includes(c)) return "6";
+    return "0";
+  };
+  let out = first;
+  let prev = map(s[0]);
+  for (let i = 1; i < s.length; i += 1) {
+    const code = map(s[i]);
+    if (code !== "0" && code !== prev) out += code;
+    prev = code;
+  }
+  out = (out + "000").slice(0, 4);
+  return out;
+}
+
+function levenshteinDistance(a, b) {
+  const s = String(a || "");
+  const t = String(b || "");
+  const n = s.length;
+  const m = t.length;
+  if (n === 0) return m;
+  if (m === 0) return n;
+  const v0 = new Array(m + 1);
+  const v1 = new Array(m + 1);
+  for (let i = 0; i <= m; i += 1) v0[i] = i;
+  for (let i = 0; i < n; i += 1) {
+    v1[0] = i + 1;
+    const si = s[i];
+    for (let j = 0; j < m; j += 1) {
+      const cost = si === t[j] ? 0 : 1;
+      const del = v0[j + 1] + 1;
+      const ins = v1[j] + 1;
+      const sub = v0[j] + cost;
+      v1[j + 1] = Math.min(del, ins, sub);
+    }
+    for (let j = 0; j <= m; j += 1) v0[j] = v1[j];
+  }
+  return v0[m];
+}
+
+function similarityRatio(a, b) {
+  const x = normalizeString(a);
+  const y = normalizeString(b);
+  if (!x && !y) return 1;
+  if (!x || !y) return 0;
+  const maxLen = Math.max(x.length, y.length);
+  if (maxLen === 0) return 1;
+  const d = levenshteinDistance(x.toLowerCase(), y.toLowerCase());
+  return Math.max(0, Math.min(1, 1 - d / maxLen));
+}
+
+function sigmoid(z) {
+  const x = Number(z) || 0;
+  if (x >= 0) {
+    const e = Math.exp(-x);
+    return 1 / (1 + e);
+  }
+  const e = Math.exp(x);
+  return e / (1 + e);
+}
+
+function mdmDefaultModel(entityType) {
+  const t = normalizeMdmEntityType(entityType);
+  const common = { bias: -1.2, threshold: 0.85 };
+  if (t === "customer") {
+    return {
+      ...common,
+      weights: {
+        exact_vat: 3.0,
+        exact_email: 2.2,
+        exact_phone: 1.8,
+        name_sim: 2.0,
+        phonetic_name: 0.7,
+        addr_sim: 0.9,
+      },
+    };
+  }
+  if (t === "contract") {
+    return {
+      bias: -1.0,
+      threshold: 0.9,
+      weights: {
+        exact_contract_no: 3.2,
+        same_customer: 0.9,
+        title_sim: 1.1,
+        date_overlap: 0.9,
+      },
+    };
+  }
+  if (t === "material") {
+    return { bias: -1.1, threshold: 0.9, weights: { exact_code: 3.2, name_sim: 1.6, phonetic_name: 0.5, unit_match: 0.4 } };
+  }
+  if (t === "item") {
+    return { bias: -1.1, threshold: 0.9, weights: { exact_code: 3.0, name_sim: 1.5, phonetic_name: 0.5, unit_match: 0.3 } };
+  }
+  if (t === "site") {
+    return { bias: -1.0, threshold: 0.9, weights: { exact_code: 2.6, name_sim: 1.4, phonetic_name: 0.5, addr_sim: 0.8, same_municipality: 0.6 } };
+  }
+  return { ...common, weights: { name_sim: 1.0 } };
+}
+
+async function mdmGetOrInitModel({ entityType, modelKey = "default" } = {}) {
+  if (!pool) return null;
+  const et = normalizeMdmEntityType(entityType);
+  const mk = normalizeKey(modelKey) || "default";
+  if (!et) return null;
+  const row = await pool
+    .query(`select id, entity_type, model_key, weights, bias, threshold, updated_at from mdm_model where entity_type = $1 and model_key = $2 limit 1;`, [et, mk])
+    .then((r) => r.rows[0] || null)
+    .catch(() => null);
+  if (row) {
+    return { id: row.id, entityType: row.entity_type, modelKey: row.model_key, weights: row.weights || {}, bias: Number(row.bias) || 0, threshold: Number(row.threshold) || 0.85, updatedAt: new Date(row.updated_at).toISOString() };
+  }
+  const def = mdmDefaultModel(et);
+  const id = `mdl_${crypto.randomUUID().slice(0, 18)}`;
+  await pool
+    .query(
+      `
+      insert into mdm_model (id, entity_type, model_key, weights, bias, threshold, updated_at)
+      values ($1,$2,$3,$4::jsonb,$5,$6, now())
+      on conflict (entity_type, model_key) do nothing;
+      `,
+      [id, et, mk, JSON.stringify(def.weights || {}), Number(def.bias) || 0, Number(def.threshold) || 0.85],
+    )
+    .catch(() => {});
+  const row2 = await pool
+    .query(`select id, entity_type, model_key, weights, bias, threshold, updated_at from mdm_model where entity_type = $1 and model_key = $2 limit 1;`, [et, mk])
+    .then((r) => r.rows[0] || null)
+    .catch(() => null);
+  if (!row2) return null;
+  return { id: row2.id, entityType: row2.entity_type, modelKey: row2.model_key, weights: row2.weights || {}, bias: Number(row2.bias) || 0, threshold: Number(row2.threshold) || 0.85, updatedAt: new Date(row2.updated_at).toISOString() };
+}
+
+function mdmScoreWithModel({ model, features }) {
+  const w = (model && model.weights && typeof model.weights === "object" ? model.weights : {}) || {};
+  let z = Number(model && model.bias) || 0;
+  for (const [k, v] of Object.entries(features || {})) {
+    const wk = Number(w[k] ?? 0) || 0;
+    const fv = Number(v) || 0;
+    z += wk * fv;
+  }
+  return sigmoid(z);
+}
+
+function mdmSourceRef(table, id) {
+  const t = normalizeKey(table);
+  const v = normalizeString(id);
+  if (!t || !v) return null;
+  return `${t}:${v}`;
+}
+
+function mdmParseSourceRef(value) {
+  const v = normalizeString(value);
+  const idx = v.indexOf(":");
+  if (idx <= 0) return null;
+  const table = normalizeKey(v.slice(0, idx));
+  const id = normalizeString(v.slice(idx + 1));
+  if (!table || !id) return null;
+  return { table, id, sourceRef: `${table}:${id}` };
+}
+
+async function mdmListEntities(entityType, { limit = 5000 } = {}) {
+  if (!pool) return [];
+  const et = normalizeMdmEntityType(entityType);
+  const n = Math.max(1, Math.min(50_000, Number(limit) || 5000));
+  if (!et) return [];
+  if (et === "customer") {
+    const rows = await pool
+      .query(
+        `
+        select id, customer_no, name, vat_id, email, phone, billing_address, service_addresses, active, meta, updated_at
+        from crm_customer
+        order by updated_at desc
+        limit $1;
+        `,
+        [n],
+      )
+      .then((r) => r.rows)
+      .catch(() => []);
+    return rows.map((r) => ({
+      entityType: et,
+      sourceRef: mdmSourceRef("crm_customer", r.id),
+      id: r.id,
+      customerNo: r.customer_no,
+      name: r.name,
+      vatId: r.vat_id,
+      email: r.email,
+      phone: r.phone,
+      billingAddress: r.billing_address || {},
+      serviceAddresses: r.service_addresses || [],
+      active: r.active === true,
+      meta: r.meta || {},
+      updatedAt: new Date(r.updated_at).toISOString(),
+    }));
+  }
+  if (et === "contract") {
+    const rows = await pool
+      .query(
+        `
+        select id, contract_no, customer_id, status, valid_from, valid_to, title, updated_at
+        from crm_contract
+        order by updated_at desc
+        limit $1;
+        `,
+        [n],
+      )
+      .then((r) => r.rows)
+      .catch(() => []);
+    return rows.map((r) => ({
+      entityType: et,
+      sourceRef: mdmSourceRef("crm_contract", r.id),
+      id: r.id,
+      contractNo: r.contract_no,
+      customerId: r.customer_id,
+      status: r.status,
+      validFrom: r.valid_from ? String(r.valid_from) : null,
+      validTo: r.valid_to ? String(r.valid_to) : null,
+      title: r.title || null,
+      updatedAt: new Date(r.updated_at).toISOString(),
+    }));
+  }
+  if (et === "material") {
+    const rows = await pool
+      .query(
+        `
+        select id, code, name, unit, hazard_class, active, meta, updated_at
+        from item_material
+        order by updated_at desc
+        limit $1;
+        `,
+        [n],
+      )
+      .then((r) => r.rows)
+      .catch(() => []);
+    return rows.map((r) => ({
+      entityType: et,
+      sourceRef: mdmSourceRef("item_material", r.id),
+      id: r.id,
+      code: r.code,
+      name: r.name,
+      unit: r.unit,
+      hazardClass: r.hazard_class || null,
+      active: r.active === true,
+      meta: r.meta || {},
+      updatedAt: new Date(r.updated_at).toISOString(),
+    }));
+  }
+  if (et === "item") {
+    const rows = await pool
+      .query(
+        `
+        select id, code, name, unit, active, meta, updated_at
+        from item_service
+        order by updated_at desc
+        limit $1;
+        `,
+        [n],
+      )
+      .then((r) => r.rows)
+      .catch(() => []);
+    return rows.map((r) => ({
+      entityType: et,
+      sourceRef: mdmSourceRef("item_service", r.id),
+      id: r.id,
+      code: r.code,
+      name: r.name,
+      unit: r.unit,
+      active: r.active === true,
+      meta: r.meta || {},
+      updatedAt: new Date(r.updated_at).toISOString(),
+    }));
+  }
+  if (et === "site") {
+    const rows = await pool
+      .query(
+        `
+        select 'waste_municipality' as kind, id, code, name, state as extra, null::text as municipality_id, null::text as address, null::double precision as lat, null::double precision as lon, active, updated_at
+        from waste_municipality
+        union all
+        select 'waste_disposal_site' as kind, id, code, name, null::text as extra, municipality_id, address, lat, lon, active, updated_at
+        from waste_disposal_site
+        order by updated_at desc
+        limit $1;
+        `,
+        [n],
+      )
+      .then((r) => r.rows)
+      .catch(() => []);
+    return rows.map((r) => ({
+      entityType: et,
+      sourceRef: mdmSourceRef(r.kind, r.id),
+      id: r.id,
+      kind: r.kind,
+      code: r.code,
+      name: r.name,
+      municipalityId: r.municipality_id || null,
+      address: r.address || null,
+      lat: r.lat === null || r.lat === undefined ? null : Number(r.lat),
+      lon: r.lon === null || r.lon === undefined ? null : Number(r.lon),
+      active: r.active === true,
+      extra: r.extra || null,
+      updatedAt: new Date(r.updated_at).toISOString(),
+    }));
+  }
+  return [];
+}
+
+function mdmBlockingKeys(entityType, record) {
+  const et = normalizeMdmEntityType(entityType);
+  if (!et || !record) return [];
+  const keys = new Set();
+  const add = (k) => {
+    const v = normalizeString(k);
+    if (v) keys.add(`${et}:${v}`.slice(0, 120));
+  };
+  if (et === "customer") {
+    const email = normalizeEmail(record.email);
+    const phone = normalizePhone(record.phone);
+    const vat = normalizeVatId(record.vatId);
+    if (email) add(`email:${email}`);
+    if (phone) add(`phone:${phone}`);
+    if (vat) add(`vat:${vat}`);
+    const sx = soundex(record.name);
+    if (sx) add(`sx:${sx}`);
+    const zip = normalizeString(record.billingAddress?.zip || record.billingAddress?.postalCode || "").replace(/[^\d]/g, "");
+    if (sx && zip) add(`sxzip:${sx}:${zip}`);
+  } else if (et === "contract") {
+    const no = normalizeString(record.contractNo).toUpperCase();
+    if (no) add(`no:${no}`);
+    const sx = soundex(record.title || "");
+    if (sx) add(`sx:${sx}`);
+    const cid = normalizeString(record.customerId);
+    if (cid && sx) add(`cx:${cid}:${sx}`);
+  } else if (et === "material" || et === "item") {
+    const code = normalizeString(record.code).toUpperCase();
+    if (code) add(`code:${code}`);
+    const sx = soundex(record.name);
+    if (sx) add(`sx:${sx}`);
+  } else if (et === "site") {
+    const code = normalizeString(record.code).toUpperCase();
+    if (code) add(`code:${code}`);
+    const sx = soundex(record.name);
+    if (sx) add(`sx:${sx}`);
+    const addr = normalizeAddressText(record.address || "");
+    if (addr && sx) add(`sxaddr:${sx}:${addr.slice(0, 16)}`);
+    const mid = normalizeString(record.municipalityId);
+    if (mid && sx) add(`mx:${mid}:${sx}`);
+  }
+  return Array.from(keys);
+}
+
+function mdmComputeFeatures(entityType, a, b) {
+  const et = normalizeMdmEntityType(entityType);
+  if (!et) return {};
+  const f = {};
+  const bool = (x) => (x ? 1 : 0);
+  if (et === "customer") {
+    const vatA = normalizeVatId(a.vatId);
+    const vatB = normalizeVatId(b.vatId);
+    f.exact_vat = bool(vatA && vatB && vatA === vatB);
+    const emA = normalizeEmail(a.email);
+    const emB = normalizeEmail(b.email);
+    f.exact_email = bool(emA && emB && emA === emB);
+    const phA = normalizePhone(a.phone);
+    const phB = normalizePhone(b.phone);
+    f.exact_phone = bool(phA && phB && phA === phB);
+    const nA = normalizeName(a.name);
+    const nB = normalizeName(b.name);
+    f.name_sim = similarityRatio(nA || "", nB || "");
+    f.phonetic_name = bool(soundex(nA) && soundex(nB) && soundex(nA) === soundex(nB));
+    const addrA = normalizeAddressText(a.billingAddress?.street || a.billingAddress?.address || "") || normalizeAddressText(a.billingAddress?.city || "");
+    const addrB = normalizeAddressText(b.billingAddress?.street || b.billingAddress?.address || "") || normalizeAddressText(b.billingAddress?.city || "");
+    f.addr_sim = similarityRatio(addrA || "", addrB || "");
+    return f;
+  }
+  if (et === "contract") {
+    const noA = normalizeString(a.contractNo).toUpperCase();
+    const noB = normalizeString(b.contractNo).toUpperCase();
+    f.exact_contract_no = bool(noA && noB && noA === noB);
+    const cidA = normalizeString(a.customerId);
+    const cidB = normalizeString(b.customerId);
+    f.same_customer = bool(cidA && cidB && cidA === cidB);
+    f.title_sim = similarityRatio(normalizeName(a.title || ""), normalizeName(b.title || ""));
+    const aFrom = a.validFrom ? new Date(`${a.validFrom}T00:00:00Z`) : null;
+    const aTo = a.validTo ? new Date(`${a.validTo}T23:59:59Z`) : null;
+    const bFrom = b.validFrom ? new Date(`${b.validFrom}T00:00:00Z`) : null;
+    const bTo = b.validTo ? new Date(`${b.validTo}T23:59:59Z`) : null;
+    const overlap =
+      aFrom && bFrom
+        ? (() => {
+            const endA = aTo && !Number.isNaN(aTo.valueOf()) ? aTo : new Date("2999-12-31T23:59:59Z");
+            const endB = bTo && !Number.isNaN(bTo.valueOf()) ? bTo : new Date("2999-12-31T23:59:59Z");
+            const start = Math.max(aFrom.getTime(), bFrom.getTime());
+            const end = Math.min(endA.getTime(), endB.getTime());
+            return end >= start;
+          })()
+        : false;
+    f.date_overlap = bool(overlap);
+    return f;
+  }
+  if (et === "material" || et === "item") {
+    const codeA = normalizeString(a.code).toUpperCase();
+    const codeB = normalizeString(b.code).toUpperCase();
+    f.exact_code = bool(codeA && codeB && codeA === codeB);
+    const nA = normalizeName(a.name);
+    const nB = normalizeName(b.name);
+    f.name_sim = similarityRatio(nA || "", nB || "");
+    f.phonetic_name = bool(soundex(nA) && soundex(nB) && soundex(nA) === soundex(nB));
+    const uA = normalizeString(a.unit).toLowerCase();
+    const uB = normalizeString(b.unit).toLowerCase();
+    f.unit_match = bool(uA && uB && uA === uB);
+    return f;
+  }
+  if (et === "site") {
+    const codeA = normalizeString(a.code).toUpperCase();
+    const codeB = normalizeString(b.code).toUpperCase();
+    f.exact_code = bool(codeA && codeB && codeA === codeB);
+    const nA = normalizeName(a.name);
+    const nB = normalizeName(b.name);
+    f.name_sim = similarityRatio(nA || "", nB || "");
+    f.phonetic_name = bool(soundex(nA) && soundex(nB) && soundex(nA) === soundex(nB));
+    const addrA = normalizeAddressText(a.address || "");
+    const addrB = normalizeAddressText(b.address || "");
+    f.addr_sim = similarityRatio(addrA || "", addrB || "");
+    const mA = normalizeString(a.municipalityId);
+    const mB = normalizeString(b.municipalityId);
+    f.same_municipality = bool(mA && mB && mA === mB);
+    return f;
+  }
+  return {};
+}
+
+async function mdmUpsertCandidate({ entityType, leftRef, rightRef, score, signals }) {
+  if (!pool) return { ok: false, error: "db_required" };
+  const et = normalizeMdmEntityType(entityType);
+  const l = normalizeString(leftRef);
+  const r = normalizeString(rightRef);
+  if (!et) return { ok: false, error: "entityType_invalid" };
+  if (!l || !r || l === r) return { ok: false, error: "pair_invalid" };
+  const a = l < r ? l : r;
+  const b = l < r ? r : l;
+  const id = `mdc_${crypto.randomUUID().slice(0, 18)}`;
+  const st = Number(score);
+  const sig = signals && typeof signals === "object" ? signals : {};
+  await pool
+    .query(
+      `
+      insert into mdm_match_candidate (id, entity_type, left_ref, right_ref, score, signals, status)
+      values ($1,$2,$3,$4,$5,$6::jsonb,'open')
+      on conflict (entity_type, left_ref, right_ref) do update
+        set score = greatest(excluded.score, mdm_match_candidate.score),
+            signals = excluded.signals;
+      `,
+      [id, et, a, b, st, JSON.stringify(sig)],
+    )
+    .catch(() => {});
+  return { ok: true };
+}
+
+async function mdmScanDuplicates({ entityType, limitRecords = 5000, threshold = null, modelKey = "default" } = {}) {
+  if (!pool) return { ok: false, error: "db_required" };
+  const et = normalizeMdmEntityType(entityType);
+  if (!et) return { ok: false, error: "entityType_invalid" };
+  const model = await mdmGetOrInitModel({ entityType: et, modelKey });
+  if (!model) return { ok: false, error: "model_missing" };
+  const th = threshold === null || threshold === undefined || threshold === "" ? Number(model.threshold) || 0.85 : Math.max(0.1, Math.min(0.999, Number(threshold) || 0.85));
+  const records = await mdmListEntities(et, { limit: limitRecords });
+  const byKey = new Map();
+  for (let i = 0; i < records.length; i += 1) {
+    const rec = records[i];
+    for (const key of mdmBlockingKeys(et, rec)) {
+      const list = byKey.get(key) || [];
+      list.push(i);
+      byKey.set(key, list);
+    }
+  }
+  const pairs = new Set();
+  let created = 0;
+  for (const idxs of byKey.values()) {
+    if (idxs.length < 2) continue;
+    const maxBucket = Math.min(200, idxs.length);
+    for (let i = 0; i < maxBucket; i += 1) {
+      for (let j = i + 1; j < maxBucket; j += 1) {
+        const a = idxs[i];
+        const b = idxs[j];
+        const k = a < b ? `${a}|${b}` : `${b}|${a}`;
+        pairs.add(k);
+      }
+    }
+  }
+  for (const k of pairs) {
+    const [ai, bi] = k.split("|").map((x) => Number(x));
+    const A = records[ai];
+    const B = records[bi];
+    if (!A || !B) continue;
+    const features = mdmComputeFeatures(et, A, B);
+    const score = mdmScoreWithModel({ model, features });
+    if (score < th) continue;
+    const signals = { features, threshold: th, modelKey, updatedAt: new Date().toISOString() };
+    const r = await mdmUpsertCandidate({ entityType: et, leftRef: A.sourceRef, rightRef: B.sourceRef, score, signals });
+    if (r.ok) created += 1;
+  }
+  return { ok: true, entityType: et, threshold: th, scanned: records.length, candidatesCreated: created, candidatePairsEvaluated: pairs.size };
+}
+
+async function mdmAutoMergeStrongMatches({ entityType, threshold = null, limit = 100, username, modelKey = "default" } = {}) {
+  if (!pool) return { ok: false, error: "db_required" };
+  const et = normalizeMdmEntityType(entityType);
+  const u = normalizeString(username);
+  if (!et) return { ok: false, error: "entityType_invalid" };
+  if (!u) return { ok: false, error: "username_required" };
+  const model = await mdmGetOrInitModel({ entityType: et, modelKey });
+  if (!model) return { ok: false, error: "model_missing" };
+  const th = threshold === null || threshold === undefined || threshold === "" ? Number(model.threshold) || 0.85 : Math.max(0.1, Math.min(0.999, Number(threshold) || 0.85));
+  const n = Math.max(1, Math.min(500, Number(limit) || 100));
+  const rows = await pool
+    .query(
+      `
+      select id, left_ref, right_ref, score, signals
+      from mdm_match_candidate
+      where entity_type = $1 and status = 'open' and score >= $2
+      order by score desc, created_at asc
+      limit $3;
+      `,
+      [et, th, n],
+    )
+    .then((r) => r.rows)
+    .catch(() => []);
+
+  const isStrong = (features) => {
+    const f = features && typeof features === "object" ? features : {};
+    if (et === "customer") return f.exact_vat === 1 || f.exact_email === 1;
+    if (et === "contract") return f.exact_contract_no === 1;
+    if (et === "material" || et === "item" || et === "site") return f.exact_code === 1;
+    return false;
+  };
+
+  let merged = 0;
+  for (const row of rows) {
+    const features = row.signals && typeof row.signals === "object" ? row.signals.features : null;
+    if (!isStrong(features)) continue;
+    const leftRef = normalizeString(row.left_ref);
+    const rightRef = normalizeString(row.right_ref);
+    if (!leftRef || !rightRef) continue;
+    const decide = await mdmDecideCandidate({ id: row.id, decision: "confirm", username: u, reason: "auto_merge_strong_match" });
+    if (!decide.ok && decide.error !== "candidate_not_open") continue;
+    const merge = await mdmUpsertGoldenRecord({ entityType: et, sourceRefs: [leftRef, rightRef], username: u, reason: "auto_merge_strong_match" });
+    if (merge.ok) {
+      merged += 1;
+      await pool.query(`update mdm_match_candidate set status = 'merged' where id = $1;`, [row.id]).catch(() => {});
+    }
+  }
+  return { ok: true, entityType: et, threshold: th, considered: rows.length, merged };
+}
+
+function mdmGoldenKeyFor(entityType, sources) {
+  const et = normalizeMdmEntityType(entityType);
+  if (!et) return null;
+  const list = Array.isArray(sources) ? sources : [];
+  const base =
+    et === "customer"
+      ? normalizeVatId(list.find((x) => normalizeVatId(x.vatId))?.vatId) || normalizeEmail(list.find((x) => normalizeEmail(x.email))?.email) || normalizePhone(list.find((x) => normalizePhone(x.phone))?.phone) || soundex(list.find((x) => x.name)?.name) || null
+      : et === "contract"
+        ? normalizeString(list.find((x) => x.contractNo)?.contractNo).toUpperCase() || null
+        : et === "material" || et === "item"
+          ? normalizeString(list.find((x) => x.code)?.code).toUpperCase() || soundex(list.find((x) => x.name)?.name) || null
+          : et === "site"
+            ? normalizeString(list.find((x) => x.code)?.code).toUpperCase() || soundex(list.find((x) => x.name)?.name) || null
+            : null;
+  const raw = base || list.map((x) => normalizeString(x.sourceRef)).filter(Boolean).sort().join("|");
+  return `${et}_${sha256Hex(raw).slice(0, 12)}`;
+}
+
+function mdmPickBestString(candidates) {
+  const items = Array.isArray(candidates) ? candidates : [];
+  const sorted = items
+    .map((x) => ({ value: normalizeString(x.value) || null, score: Number(x.score) || 0, updatedAt: x.updatedAt ? new Date(x.updatedAt).getTime() : 0 }))
+    .filter((x) => x.value)
+    .sort((a, b) => (b.score - a.score) || (b.value.length - a.value.length) || (b.updatedAt - a.updatedAt));
+  return sorted.length ? sorted[0].value : null;
+}
+
+function mdmBuildGoldenPayload(entityType, sources) {
+  const et = normalizeMdmEntityType(entityType);
+  const list = Array.isArray(sources) ? sources : [];
+  if (!et) return null;
+  const scoreBase = (r) => (r && r.active === true ? 2 : 0) + (r && r.updatedAt ? 1 : 0);
+  if (et === "customer") {
+    const name = mdmPickBestString(list.map((r) => ({ value: r.name, score: scoreBase(r), updatedAt: r.updatedAt })));
+    const vatId = mdmPickBestString(list.map((r) => ({ value: normalizeVatId(r.vatId), score: scoreBase(r), updatedAt: r.updatedAt })));
+    const email = mdmPickBestString(list.map((r) => ({ value: normalizeEmail(r.email), score: scoreBase(r), updatedAt: r.updatedAt })));
+    const phone = mdmPickBestString(list.map((r) => ({ value: normalizePhone(r.phone), score: scoreBase(r), updatedAt: r.updatedAt })));
+    const billingAddress = list.map((r) => r.billingAddress).find((x) => x && typeof x === "object" && Object.keys(x).length) || {};
+    const serviceAddresses = list.reduce((acc, r) => acc.concat(Array.isArray(r.serviceAddresses) ? r.serviceAddresses : []), []);
+    const active = list.some((r) => r.active === true);
+    return { name, vatId: vatId || null, email: email || null, phone: phone || null, billingAddress, serviceAddresses, active };
+  }
+  if (et === "contract") {
+    const contractNo = mdmPickBestString(list.map((r) => ({ value: r.contractNo, score: scoreBase(r), updatedAt: r.updatedAt })));
+    const title = mdmPickBestString(list.map((r) => ({ value: r.title, score: scoreBase(r), updatedAt: r.updatedAt })));
+    const customerId = mdmPickBestString(list.map((r) => ({ value: r.customerId, score: scoreBase(r), updatedAt: r.updatedAt })));
+    const validFrom = mdmPickBestString(list.map((r) => ({ value: r.validFrom, score: scoreBase(r), updatedAt: r.updatedAt })));
+    const validTo = mdmPickBestString(list.map((r) => ({ value: r.validTo, score: scoreBase(r), updatedAt: r.updatedAt })));
+    const status = mdmPickBestString(list.map((r) => ({ value: r.status, score: scoreBase(r), updatedAt: r.updatedAt })));
+    return { contractNo: contractNo || null, customerId: customerId || null, title: title || null, status: status || null, validFrom: validFrom || null, validTo: validTo || null };
+  }
+  if (et === "material" || et === "item") {
+    const code = mdmPickBestString(list.map((r) => ({ value: r.code, score: scoreBase(r), updatedAt: r.updatedAt })));
+    const name = mdmPickBestString(list.map((r) => ({ value: r.name, score: scoreBase(r), updatedAt: r.updatedAt })));
+    const unit = mdmPickBestString(list.map((r) => ({ value: r.unit, score: scoreBase(r), updatedAt: r.updatedAt })));
+    return { code: code || null, name: name || null, unit: unit || null, active: list.some((r) => r.active === true) };
+  }
+  if (et === "site") {
+    const code = mdmPickBestString(list.map((r) => ({ value: r.code, score: scoreBase(r), updatedAt: r.updatedAt })));
+    const name = mdmPickBestString(list.map((r) => ({ value: r.name, score: scoreBase(r), updatedAt: r.updatedAt })));
+    const address = mdmPickBestString(list.map((r) => ({ value: r.address, score: scoreBase(r), updatedAt: r.updatedAt })));
+    const municipalityId = mdmPickBestString(list.map((r) => ({ value: r.municipalityId, score: scoreBase(r), updatedAt: r.updatedAt })));
+    const lat = list.map((r) => (Number.isFinite(r.lat) ? r.lat : null)).find((x) => x !== null) ?? null;
+    const lon = list.map((r) => (Number.isFinite(r.lon) ? r.lon : null)).find((x) => x !== null) ?? null;
+    return { code: code || null, name: name || null, address: address || null, municipalityId: municipalityId || null, lat, lon, active: list.some((r) => r.active === true) };
+  }
+  return { active: list.some((r) => r.active === true) };
+}
+
+async function mdmFetchRecordsBySourceRefs(entityType, sourceRefs) {
+  const et = normalizeMdmEntityType(entityType);
+  const refs = Array.isArray(sourceRefs) ? sourceRefs.map((x) => normalizeString(x)).filter(Boolean) : [];
+  if (!et || !refs.length) return [];
+  const parsed = refs.map(mdmParseSourceRef).filter(Boolean);
+  const byTable = new Map();
+  for (const p of parsed) {
+    const list = byTable.get(p.table) || [];
+    list.push(p.id);
+    byTable.set(p.table, list);
+  }
+  const out = [];
+  for (const [table, ids] of byTable.entries()) {
+    if (table === "crm_customer") {
+      const rows = await pool.query(`select id, customer_no, name, vat_id, email, phone, billing_address, service_addresses, active, meta, updated_at from crm_customer where id = any($1::text[]);`, [ids]).then((r) => r.rows).catch(() => []);
+      for (const r of rows) out.push({ entityType: "customer", sourceRef: mdmSourceRef("crm_customer", r.id), id: r.id, customerNo: r.customer_no, name: r.name, vatId: r.vat_id, email: r.email, phone: r.phone, billingAddress: r.billing_address || {}, serviceAddresses: r.service_addresses || [], active: r.active === true, meta: r.meta || {}, updatedAt: new Date(r.updated_at).toISOString() });
+    } else if (table === "crm_contract") {
+      const rows = await pool.query(`select id, contract_no, customer_id, status, valid_from, valid_to, title, updated_at from crm_contract where id = any($1::text[]);`, [ids]).then((r) => r.rows).catch(() => []);
+      for (const r of rows) out.push({ entityType: "contract", sourceRef: mdmSourceRef("crm_contract", r.id), id: r.id, contractNo: r.contract_no, customerId: r.customer_id, status: r.status, validFrom: r.valid_from ? String(r.valid_from) : null, validTo: r.valid_to ? String(r.valid_to) : null, title: r.title || null, updatedAt: new Date(r.updated_at).toISOString() });
+    } else if (table === "item_material") {
+      const rows = await pool.query(`select id, code, name, unit, hazard_class, active, meta, updated_at from item_material where id = any($1::text[]);`, [ids]).then((r) => r.rows).catch(() => []);
+      for (const r of rows) out.push({ entityType: "material", sourceRef: mdmSourceRef("item_material", r.id), id: r.id, code: r.code, name: r.name, unit: r.unit, hazardClass: r.hazard_class || null, active: r.active === true, meta: r.meta || {}, updatedAt: new Date(r.updated_at).toISOString() });
+    } else if (table === "item_service") {
+      const rows = await pool.query(`select id, code, name, unit, active, meta, updated_at from item_service where id = any($1::text[]);`, [ids]).then((r) => r.rows).catch(() => []);
+      for (const r of rows) out.push({ entityType: "item", sourceRef: mdmSourceRef("item_service", r.id), id: r.id, code: r.code, name: r.name, unit: r.unit, active: r.active === true, meta: r.meta || {}, updatedAt: new Date(r.updated_at).toISOString() });
+    } else if (table === "waste_municipality") {
+      const rows = await pool.query(`select id, code, name, state, active, updated_at from waste_municipality where id = any($1::text[]);`, [ids]).then((r) => r.rows).catch(() => []);
+      for (const r of rows) out.push({ entityType: "site", sourceRef: mdmSourceRef("waste_municipality", r.id), id: r.id, kind: "waste_municipality", code: r.code, name: r.name, municipalityId: null, address: null, lat: null, lon: null, active: r.active === true, extra: r.state || null, updatedAt: new Date(r.updated_at).toISOString() });
+    } else if (table === "waste_disposal_site") {
+      const rows = await pool.query(`select id, municipality_id, code, name, lat, lon, address, active, updated_at from waste_disposal_site where id = any($1::text[]);`, [ids]).then((r) => r.rows).catch(() => []);
+      for (const r of rows) out.push({ entityType: "site", sourceRef: mdmSourceRef("waste_disposal_site", r.id), id: r.id, kind: "waste_disposal_site", code: r.code, name: r.name, municipalityId: r.municipality_id || null, address: r.address || null, lat: r.lat === null ? null : Number(r.lat), lon: r.lon === null ? null : Number(r.lon), active: r.active === true, extra: null, updatedAt: new Date(r.updated_at).toISOString() });
+    }
+  }
+  return out.filter((x) => x.entityType === et);
+}
+
+async function mdmUpsertGoldenRecord({ entityType, sourceRefs, username, reason = null } = {}) {
+  if (!pool) return { ok: false, error: "db_required" };
+  const et = normalizeMdmEntityType(entityType);
+  const u = normalizeString(username);
+  const refs = Array.from(new Set((Array.isArray(sourceRefs) ? sourceRefs : []).map((x) => normalizeString(x)).filter(Boolean)));
+  if (!et) return { ok: false, error: "entityType_invalid" };
+  if (!u) return { ok: false, error: "username_required" };
+  if (refs.length < 2) return { ok: false, error: "sourceRefs_min_2" };
+  const sources = await mdmFetchRecordsBySourceRefs(et, refs);
+  if (sources.length < 2) return { ok: false, error: "sources_not_found" };
+  const goldenKey = mdmGoldenKeyFor(et, sources);
+  const payload = mdmBuildGoldenPayload(et, sources);
+  if (!goldenKey || !payload) return { ok: false, error: "golden_payload_invalid" };
+
+  const client = await pool.connect();
+  let goldenId = null;
+  let version = 1;
+  try {
+    await client.query("begin;");
+    const existing = await client.query(`select id, version from mdm_golden_record where entity_type = $1 and golden_key = $2 limit 1;`, [et, goldenKey]).then((r) => r.rows[0] || null);
+    if (existing) {
+      goldenId = String(existing.id);
+      version = (Number(existing.version) || 1) + 1;
+      await client.query(`update mdm_golden_record set payload = $3::jsonb, source_refs = $4::jsonb, version = $5, updated_at = now() where id = $1 and entity_type = $2;`, [goldenId, et, JSON.stringify(payload), JSON.stringify(refs.sort()), version]);
+    } else {
+      goldenId = `gr_${crypto.randomUUID().slice(0, 18)}`;
+      await client.query(
+        `
+        insert into mdm_golden_record (id, entity_type, golden_key, payload, source_refs, version, status)
+        values ($1,$2,$3,$4::jsonb,$5::jsonb,1,'active');
+        `,
+        [goldenId, et, goldenKey, JSON.stringify(payload), JSON.stringify(refs.sort())],
+      );
+    }
+    for (const ref of refs) {
+      await client.query(`insert into mdm_entity_map (entity_type, source_ref, golden_id) values ($1,$2,$3) on conflict (entity_type, source_ref) do update set golden_id = excluded.golden_id;`, [et, ref, goldenId]);
+    }
+    await client.query(
+      `
+      insert into mdm_audit (id, event_type, entity_type, golden_id, source_ref, username, occurred_at, meta)
+      values ($1,$2,$3,$4,$5,$6, now(), $7::jsonb);
+      `,
+      [`mda_${crypto.randomUUID().slice(0, 18)}`, "GOLDEN_RECORD_UPSERTED", et, goldenId, null, u, JSON.stringify({ goldenKey, version, reason: normalizeString(reason) || null, sourceRefs: refs })],
+    );
+    await client.query("commit;");
+  } catch {
+    try {
+      await client.query("rollback;");
+    } catch {}
+    return { ok: false, error: "golden_upsert_failed" };
+  } finally {
+    client.release();
+  }
+
+  await publishErpEvent({
+    eventType: "MDM_GOLDEN_RECORD_UPSERTED",
+    aggregateType: "mdm_golden_record",
+    aggregateId: goldenId,
+    createdBy: u,
+    payload: { entityType: et, goldenId, goldenKey, version, sourceRefs: refs, reason: normalizeString(reason) || null },
+  });
+  publishEvent("mdm", "MDM_GOLDEN_RECORD_UPSERTED", { entityType: et, goldenId, goldenKey, version, sourceRefs: refs });
+  return { ok: true, entityType: et, goldenId, goldenKey, version, payload, sourceRefs: refs };
+}
+
+async function mdmListCandidates({ entityType, status = null, leftRef = null, rightRef = null, limit = 100 } = {}) {
+  if (!pool) return [];
+  const et = normalizeMdmEntityType(entityType);
+  const st = status ? normalizeString(status).toLowerCase() : null;
+  const l = normalizeString(leftRef) || null;
+  const r = normalizeString(rightRef) || null;
+  const n = Math.max(1, Math.min(500, Number(limit) || 100));
+  if (!et) return [];
+  const rows = await pool
+    .query(
+      `
+      select id, entity_type, left_ref, right_ref, score, signals, status, created_at, decided_at, decided_by, decision_reason
+      from mdm_match_candidate
+      where entity_type = $1
+        and ($2::text is null or status = $2)
+        and ($4::text is null or $5::text is null or ((left_ref = $4 and right_ref = $5) or (left_ref = $5 and right_ref = $4)))
+      order by score desc, created_at desc
+      limit $3;
+      `,
+      [et, st, n, l, r],
+    )
+    .then((r) => r.rows)
+    .catch(() => []);
+  return rows.map((r) => ({
+    id: r.id,
+    entityType: r.entity_type,
+    leftRef: r.left_ref,
+    rightRef: r.right_ref,
+    score: Number(r.score) || 0,
+    signals: r.signals || {},
+    status: r.status,
+    createdAt: new Date(r.created_at).toISOString(),
+    decidedAt: r.decided_at ? new Date(r.decided_at).toISOString() : null,
+    decidedBy: r.decided_by || null,
+    decisionReason: r.decision_reason || null,
+  }));
+}
+
+async function mdmDecideCandidate({ id, decision, username, reason = null } = {}) {
+  if (!pool) return { ok: false, error: "db_required" };
+  const cid = normalizeString(id);
+  const dec = normalizeString(decision).toLowerCase();
+  const u = normalizeString(username);
+  if (!cid) return { ok: false, error: "id_required" };
+  if (!u) return { ok: false, error: "username_required" };
+  if (!["confirm", "reject"].includes(dec)) return { ok: false, error: "decision_invalid" };
+  const row = await pool.query(`select id, entity_type, left_ref, right_ref, status from mdm_match_candidate where id = $1 limit 1;`, [cid]).then((r) => r.rows[0] || null).catch(() => null);
+  if (!row) return { ok: false, error: "candidate_not_found" };
+  if (row.status !== "open") return { ok: false, error: "candidate_not_open" };
+  const nextStatus = dec === "confirm" ? "confirmed" : "rejected";
+  await pool.query(`update mdm_match_candidate set status = $2, decided_at = now(), decided_by = $3, decision_reason = $4 where id = $1;`, [cid, nextStatus, u, normalizeString(reason) || null]);
+  await pool.query(`insert into mdm_audit (id, event_type, entity_type, golden_id, source_ref, username, occurred_at, meta) values ($1,$2,$3,null,null,$4, now(), $5::jsonb);`, [`mda_${crypto.randomUUID().slice(0, 18)}`, dec === "confirm" ? "CANDIDATE_CONFIRMED" : "CANDIDATE_REJECTED", row.entity_type, u, JSON.stringify({ candidateId: cid, leftRef: row.left_ref, rightRef: row.right_ref, reason: normalizeString(reason) || null })]);
+  await publishErpEvent({ eventType: dec === "confirm" ? "MDM_CANDIDATE_CONFIRMED" : "MDM_CANDIDATE_REJECTED", aggregateType: "mdm_match_candidate", aggregateId: cid, createdBy: u, payload: { id: cid, entityType: row.entity_type, leftRef: row.left_ref, rightRef: row.right_ref, reason: normalizeString(reason) || null } });
+  return { ok: true, status: nextStatus };
+}
+
+async function mdmGetGolden({ entityType, goldenId = null, sourceRef = null } = {}) {
+  if (!pool) return null;
+  const et = normalizeMdmEntityType(entityType);
+  const gid = normalizeString(goldenId) || null;
+  const ref = normalizeString(sourceRef) || null;
+  if (!et) return null;
+  let id = gid;
+  if (!id && ref) {
+    const map = await pool.query(`select golden_id from mdm_entity_map where entity_type = $1 and source_ref = $2 limit 1;`, [et, ref]).then((r) => r.rows[0] || null).catch(() => null);
+    id = map ? map.golden_id : null;
+  }
+  if (!id) return null;
+  const row = await pool
+    .query(`select id, entity_type, golden_key, payload, source_refs, version, status, created_at, updated_at from mdm_golden_record where id = $1 and entity_type = $2 limit 1;`, [id, et])
+    .then((r) => r.rows[0] || null)
+    .catch(() => null);
+  if (!row) return null;
+  return {
+    id: row.id,
+    entityType: row.entity_type,
+    goldenKey: row.golden_key,
+    payload: row.payload || {},
+    sourceRefs: row.source_refs || [],
+    version: Number(row.version) || 1,
+    status: row.status,
+    createdAt: new Date(row.created_at).toISOString(),
+    updatedAt: new Date(row.updated_at).toISOString(),
+  };
+}
+
+async function mdmCreateQualityIssue({ entityType, sourceRef, issueType, severity, message, meta = {}, username = "system" } = {}) {
+  if (!pool) return { ok: false, error: "db_required" };
+  const et = normalizeMdmEntityType(entityType);
+  const sr = normalizeString(sourceRef);
+  const it = normalizeKey(issueType);
+  const sev = normalizeString(severity).toLowerCase();
+  const msg = normalizeString(message);
+  const u = normalizeString(username) || "system";
+  if (!et) return { ok: false, error: "entityType_invalid" };
+  if (!sr) return { ok: false, error: "sourceRef_required" };
+  if (!it) return { ok: false, error: "issueType_required" };
+  if (!["low", "medium", "high", "critical"].includes(sev)) return { ok: false, error: "severity_invalid" };
+  if (!msg) return { ok: false, error: "message_required" };
+  const id = `mdi_${crypto.randomUUID().slice(0, 18)}`;
+  await pool
+    .query(
+      `
+      insert into mdm_quality_issue (id, entity_type, source_ref, issue_type, severity, message, meta, status)
+      values ($1,$2,$3,$4,$5,$6,$7::jsonb,'open');
+      `,
+      [id, et, sr, it, sev, msg, JSON.stringify(meta && typeof meta === "object" ? meta : {})],
+    )
+    .catch(() => {});
+  await publishErpEvent({ eventType: "MDM_QUALITY_ISSUE_DETECTED", aggregateType: "mdm_quality_issue", aggregateId: id, createdBy: u, payload: { id, entityType: et, sourceRef: sr, issueType: it, severity: sev, message: msg } });
+  await publishErpEvent({
+    eventType: "EMAIL_NOTIFICATION_REQUESTED",
+    aggregateType: "mdm_quality_issue",
+    aggregateId: id,
+    createdBy: "system",
+    payload: { template: "mdm_quality_issue", toPermission: Permissions.ApprovalApproveMasterdata, entityType: et, issueType: it, severity: sev, issueId: id, sourceRef: sr, message: msg },
+  });
+  publishEvent("mdm", "MDM_QUALITY_ISSUE_DETECTED", { id, entityType: et, sourceRef: sr, issueType: it, severity: sev, message: msg });
+  return { ok: true, id };
+}
+
+async function mdmRunQualityChecks({ entityType, limitRecords = 200 } = {}) {
+  const et = normalizeMdmEntityType(entityType);
+  if (!et) return { ok: false, error: "entityType_invalid" };
+  if (!pool) return { ok: false, error: "db_required" };
+  const records = await mdmListEntities(et, { limit: limitRecords });
+  let issues = 0;
+  for (const r of records) {
+    if (et === "customer") {
+      if (!normalizeName(r.name)) {
+        const res = await mdmCreateQualityIssue({ entityType: et, sourceRef: r.sourceRef, issueType: "missing_name", severity: "high", message: "Kundenname fehlt oder ist leer." });
+        if (res.ok) issues += 1;
+      }
+      if (r.email && !normalizeEmail(r.email)) {
+        const res = await mdmCreateQualityIssue({ entityType: et, sourceRef: r.sourceRef, issueType: "invalid_email", severity: "medium", message: "E-Mail ist syntaktisch ungültig.", meta: { email: r.email } });
+        if (res.ok) issues += 1;
+      }
+      if (r.phone && !normalizePhone(r.phone)) {
+        const res = await mdmCreateQualityIssue({ entityType: et, sourceRef: r.sourceRef, issueType: "invalid_phone", severity: "medium", message: "Telefonnummer ist syntaktisch ungültig.", meta: { phone: r.phone } });
+        if (res.ok) issues += 1;
+      }
+    } else if (et === "contract") {
+      if (!normalizeString(r.contractNo)) {
+        const res = await mdmCreateQualityIssue({ entityType: et, sourceRef: r.sourceRef, issueType: "missing_contract_no", severity: "high", message: "Vertragsnummer fehlt." });
+        if (res.ok) issues += 1;
+      }
+      if (r.validFrom && r.validTo && new Date(`${r.validTo}T00:00:00Z`) < new Date(`${r.validFrom}T00:00:00Z`)) {
+        const res = await mdmCreateQualityIssue({ entityType: et, sourceRef: r.sourceRef, issueType: "invalid_valid_range", severity: "high", message: "Validitätszeitraum ist ungültig.", meta: { validFrom: r.validFrom, validTo: r.validTo } });
+        if (res.ok) issues += 1;
+      }
+    } else if (et === "material" || et === "item") {
+      if (!normalizeString(r.code)) {
+        const res = await mdmCreateQualityIssue({ entityType: et, sourceRef: r.sourceRef, issueType: "missing_code", severity: "high", message: "Artikel-/Materialcode fehlt." });
+        if (res.ok) issues += 1;
+      }
+      if (!normalizeName(r.name)) {
+        const res = await mdmCreateQualityIssue({ entityType: et, sourceRef: r.sourceRef, issueType: "missing_name", severity: "medium", message: "Artikel-/Materialname fehlt." });
+        if (res.ok) issues += 1;
+      }
+    } else if (et === "site") {
+      if (!normalizeString(r.code)) {
+        const res = await mdmCreateQualityIssue({ entityType: et, sourceRef: r.sourceRef, issueType: "missing_code", severity: "high", message: "Standortcode fehlt." });
+        if (res.ok) issues += 1;
+      }
+      if (!normalizeName(r.name)) {
+        const res = await mdmCreateQualityIssue({ entityType: et, sourceRef: r.sourceRef, issueType: "missing_name", severity: "medium", message: "Standortname fehlt." });
+        if (res.ok) issues += 1;
+      }
+    }
+  }
+  return { ok: true, entityType: et, scanned: records.length, issuesCreated: issues };
+}
+
+async function mdmListIssues({ status = "open", severity = null, entityType = null, limit = 100 } = {}) {
+  if (!pool) return [];
+  const st = normalizeString(status).toLowerCase() || "open";
+  const sev = severity ? normalizeString(severity).toLowerCase() : null;
+  const et = entityType ? normalizeMdmEntityType(entityType) : null;
+  const n = Math.max(1, Math.min(500, Number(limit) || 100));
+  const rows = await pool
+    .query(
+      `
+      select id, entity_type, source_ref, issue_type, severity, message, meta, status, created_at, resolved_at, resolved_by
+      from mdm_quality_issue
+      where ($1::text is null or entity_type = $1)
+        and ($2::text is null or severity = $2)
+        and ($3::text is null or status = $3)
+      order by created_at desc
+      limit $4;
+      `,
+      [et, sev, st, n],
+    )
+    .then((r) => r.rows)
+    .catch(() => []);
+  return rows.map((r) => ({
+    id: r.id,
+    entityType: r.entity_type,
+    sourceRef: r.source_ref,
+    issueType: r.issue_type,
+    severity: r.severity,
+    message: r.message,
+    meta: r.meta || {},
+    status: r.status,
+    createdAt: new Date(r.created_at).toISOString(),
+    resolvedAt: r.resolved_at ? new Date(r.resolved_at).toISOString() : null,
+    resolvedBy: r.resolved_by || null,
+  }));
+}
+
+async function mdmResolveIssue({ id, resolution, username } = {}) {
+  if (!pool) return { ok: false, error: "db_required" };
+  const iid = normalizeString(id);
+  const res = normalizeString(resolution).toLowerCase();
+  const u = normalizeString(username);
+  if (!iid) return { ok: false, error: "id_required" };
+  if (!u) return { ok: false, error: "username_required" };
+  if (!["resolved", "ignored"].includes(res)) return { ok: false, error: "resolution_invalid" };
+  const row = await pool.query(`select id, status from mdm_quality_issue where id = $1 limit 1;`, [iid]).then((r) => r.rows[0] || null).catch(() => null);
+  if (!row) return { ok: false, error: "issue_not_found" };
+  if (row.status !== "open") return { ok: false, error: "issue_not_open" };
+  await pool.query(`update mdm_quality_issue set status = $2, resolved_at = now(), resolved_by = $3 where id = $1;`, [iid, res, u]);
+  await publishErpEvent({ eventType: "MDM_QUALITY_ISSUE_RESOLVED", aggregateType: "mdm_quality_issue", aggregateId: iid, createdBy: u, payload: { id: iid, resolution: res } });
+  return { ok: true };
+}
+
+async function mdmLabelAndTrain({ entityType, leftRef, rightRef, label, username, modelKey = "default" } = {}) {
+  if (!pool) return { ok: false, error: "db_required" };
+  const et = normalizeMdmEntityType(entityType);
+  const l = normalizeString(leftRef);
+  const r = normalizeString(rightRef);
+  const u = normalizeString(username);
+  const y = label === true || label === "true" || label === 1 || label === "1" ? 1 : 0;
+  if (!et) return { ok: false, error: "entityType_invalid" };
+  if (!l || !r || l === r) return { ok: false, error: "pair_invalid" };
+  if (!u) return { ok: false, error: "username_required" };
+  const model = await mdmGetOrInitModel({ entityType: et, modelKey });
+  if (!model) return { ok: false, error: "model_missing" };
+  const sources = await mdmFetchRecordsBySourceRefs(et, [l, r]);
+  if (sources.length !== 2) return { ok: false, error: "sources_not_found" };
+  const feats = mdmComputeFeatures(et, sources[0], sources[1]);
+  const p = mdmScoreWithModel({ model, features: feats });
+  const lr = 0.25;
+  const err = y - p;
+  const newWeights = { ...(model.weights || {}) };
+  for (const [k, v] of Object.entries(feats)) {
+    const w = Number(newWeights[k] ?? 0) || 0;
+    newWeights[k] = w + lr * err * (Number(v) || 0);
+  }
+  const newBias = (Number(model.bias) || 0) + lr * err;
+  await pool.query(`update mdm_model set weights = $3::jsonb, bias = $4, updated_at = now() where id = $1 and entity_type = $2;`, [model.id, et, JSON.stringify(newWeights), newBias]).catch(() => {});
+  await pool.query(`insert into mdm_audit (id, event_type, entity_type, golden_id, source_ref, username, occurred_at, meta) values ($1,$2,$3,null,null,$4, now(), $5::jsonb);`, [`mda_${crypto.randomUUID().slice(0, 18)}`, "MODEL_LABELED", et, u, JSON.stringify({ leftRef: l, rightRef: r, label: y, pBefore: p })]).catch(() => {});
+  await publishErpEvent({ eventType: "MDM_MODEL_LABELED", aggregateType: "mdm_model", aggregateId: model.id, createdBy: u, payload: { entityType: et, modelKey, label: y } });
+  return { ok: true, entityType: et, modelKey, pBefore: p, label: y };
+}
+
+let mdmQualityTimer = null;
+async function tickMdmQuality() {
+  const entities = ["customer", "contract", "material", "item", "site"];
+  for (const et of entities) {
+    await mdmRunQualityChecks({ entityType: et, limitRecords: 50 }).catch(() => {});
+    await mdmScanDuplicates({ entityType: et, limitRecords: 2000 }).catch(() => {});
+  }
+}
+
+function startMdmQualityScheduler() {
+  if (mdmQualityTimer) return;
+  mdmQualityTimer = setInterval(() => tickMdmQuality().catch(() => {}), 60_000);
+}
+
 async function createSession({ userId, ip, userAgent }) {
   if (!pool) return null;
   const refreshToken = base64UrlEncode(crypto.randomBytes(32));
@@ -1162,7 +3502,11 @@ const metrics = {
   httpRequestsTotal: new Map(),
   httpRequestMsCount: new Map(),
   httpRequestMsSum: new Map(),
+  httpRequestMsBucket: new Map(),
+  erpEventsPublishedTotal: new Map(),
 };
+
+const httpDurationBucketsMs = [25, 50, 100, 250, 500, 1000, 2500, 5000, 10000];
 
 function metricsKey(method, path, status) {
   return `${method} ${path} ${status}`;
@@ -1173,6 +3517,20 @@ function observeHttpRequest({ method, path, status, ms }) {
   metrics.httpRequestsTotal.set(key, (metrics.httpRequestsTotal.get(key) || 0) + 1);
   metrics.httpRequestMsCount.set(key, (metrics.httpRequestMsCount.get(key) || 0) + 1);
   metrics.httpRequestMsSum.set(key, (metrics.httpRequestMsSum.get(key) || 0) + ms);
+  for (const le of httpDurationBucketsMs) {
+    if (ms <= le) {
+      const bKey = `${key} ${le}`;
+      metrics.httpRequestMsBucket.set(bKey, (metrics.httpRequestMsBucket.get(bKey) || 0) + 1);
+    }
+  }
+  const infKey = `${key} +Inf`;
+  metrics.httpRequestMsBucket.set(infKey, (metrics.httpRequestMsBucket.get(infKey) || 0) + 1);
+}
+
+function observeErpEventPublished({ eventType }) {
+  const t = normalizeString(eventType);
+  if (!t) return;
+  metrics.erpEventsPublishedTotal.set(t, (metrics.erpEventsPublishedTotal.get(t) || 0) + 1);
 }
 
 function logJson(obj) {
@@ -1181,17 +3539,248 @@ function logJson(obj) {
   } catch {}
 }
 
-async function createJob({ type, requestedBy, params }) {
+function getActiveTraceIds() {
+  try {
+    const span = otelTrace.getSpan(otelContext.active());
+    if (!span) return { traceId: null, spanId: null };
+    const sc = span.spanContext ? span.spanContext() : null;
+    const traceId = sc && typeof sc.traceId === "string" ? sc.traceId : null;
+    const spanId = sc && typeof sc.spanId === "string" ? sc.spanId : null;
+    if (!traceId || /^0+$/.test(traceId)) return { traceId: null, spanId: null };
+    return { traceId, spanId: spanId || null };
+  } catch {
+    return { traceId: null, spanId: null };
+  }
+}
+
+function sanitizeLogValue(value) {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "number" || typeof value === "boolean") return value;
+  if (typeof value === "string") {
+    let s = value;
+    s = s.replace(/(bearer\s+)[a-z0-9._-]+/gi, "$1[redacted]");
+    s = s.replace(/(password|passwd|pwd|token|secret|authorization|cookie)\s*[:=]\s*[^,\s]+/gi, "$1=[redacted]");
+    if (s.length > 2000) s = s.slice(0, 2000);
+    return s;
+  }
+  if (Array.isArray(value)) return value.slice(0, 50).map((x) => sanitizeLogValue(x));
+  if (typeof value === "object") return sanitizeLogObject(value, 0);
+  return String(value);
+}
+
+function sanitizeLogObject(obj, depth) {
+  const d = Number(depth) || 0;
+  if (!obj || typeof obj !== "object") return null;
+  if (d > 4) return "[truncated]";
+  if (Array.isArray(obj)) return obj.slice(0, 50).map((x) => sanitizeLogValue(x));
+  const out = {};
+  for (const [kRaw, v] of Object.entries(obj)) {
+    const k = String(kRaw || "");
+    if (!k) continue;
+    if (/password|passwd|pwd|token|secret|authorization|cookie|set-cookie/i.test(k)) {
+      out[k] = "[redacted]";
+      continue;
+    }
+    out[k] = sanitizeLogValue(v);
+  }
+  return out;
+}
+
+function logEvent(level, event, fields) {
+  const lvl = ["debug", "info", "warn", "error"].includes(level) ? level : "info";
+  const ev = normalizeString(event) || "event";
+  const extra = fields && typeof fields === "object" ? fields : {};
+  const safeExtra = sanitizeLogObject(extra, 0) || {};
+  logJson({ ts: new Date().toISOString(), level: lvl, event: ev, service: serviceName, env: deploymentEnv, ...safeExtra });
+}
+
+function setResponseObsError(res, body) {
+  if (!res || !body || typeof body !== "object") return;
+  if (typeof body.error === "string") res.__errorCode = body.error;
+  if (typeof body.message === "string") res.__errorMessage = body.message;
+}
+
+process.on("unhandledRejection", (reason) => {
+  logEvent("error", "unhandled_rejection", { errorMessage: String(reason || "unhandled_rejection") });
+});
+process.on("uncaughtException", (err) => {
+  logEvent("error", "uncaught_exception", { errorMessage: err && err.message ? String(err.message) : "uncaught_exception" });
+});
+
+const rateLimitEnabledRaw = String(process.env.ERP_RATE_LIMIT_ENABLED || "").trim().toLowerCase();
+const rateLimitEnabled =
+  rateLimitEnabledRaw
+    ? rateLimitEnabledRaw === "true"
+    : deploymentEnv === "production";
+const rateLimitState = new Map();
+
+function getClientIp(req) {
+  const xff = req && req.headers ? String(req.headers["x-forwarded-for"] || "") : "";
+  if (xff) {
+    const first = xff.split(",")[0].trim();
+    if (first) return first;
+  }
+  const direct = req && req.socket && req.socket.remoteAddress ? String(req.socket.remoteAddress) : "";
+  return direct || "unknown";
+}
+
+function buildMainMenuPayload(auth) {
+  const items = MainMenuCatalog.filter((item) => !item.permissions.length || hasAnyPermission(auth, item.permissions)).map((item) => ({
+    key: item.key,
+    label: item.label,
+    view: item.view,
+    moduleKey: item.moduleKey,
+  }));
+  return {
+    system: {
+      appName: "Ahlert ERP",
+      brandClaim: "Verwertung. Kanal. Brennstoffe.",
+      serverTime: new Date().toISOString(),
+      moduleCount: items.length,
+      modules: items.map((x) => x.moduleKey),
+    },
+    user: {
+      id: auth.userId || null,
+      username: auth.username || null,
+      mode: auth.mode || "header",
+      permissions: Array.from(auth.permissions || []),
+    },
+    modules: items,
+  };
+}
+
+async function writeMainMenuAudit(req, auth, { action, sectionKey = null, menuKey = null, menuLabel = null, meta = {} } = {}) {
+  if (!pool || !auth?.username || !normalizeString(action)) return;
+  await pool
+    .query(
+      `insert into ui_main_menu_audit (id, user_id, username, action, section_key, menu_key, menu_label, ip_address, client, user_agent, meta, occurred_at)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb, now());`,
+      [
+        `mmau_${crypto.randomUUID().slice(0, 18)}`,
+        auth.userId || null,
+        auth.username,
+        normalizeString(action),
+        normalizeString(sectionKey) || null,
+        normalizeString(menuKey) || null,
+        normalizeString(menuLabel) || null,
+        getClientIp(req),
+        normalizeString(req.headers["x-client"] || "web"),
+        normalizeString(req.headers["user-agent"] || "") || null,
+        JSON.stringify(meta || {}),
+      ],
+    )
+    .catch(() => {});
+}
+
+function consumeRateLimitToken({ key, capacity, refillPerMs }) {
+  const now = Date.now();
+  const k = String(key || "");
+  if (!k) return { ok: true, remaining: capacity };
+  const cap = Math.max(1, Number(capacity) || 1);
+  const rate = Math.max(0, Number(refillPerMs) || 0);
+  const cur = rateLimitState.get(k) || { tokens: cap, last: now };
+  const elapsed = Math.max(0, now - (Number(cur.last) || now));
+  const refill = rate > 0 ? elapsed * rate : 0;
+  const tokens = Math.min(cap, (Number(cur.tokens) || 0) + refill);
+  const nextTokens = tokens - 1;
+  const ok = nextTokens >= 0;
+  rateLimitState.set(k, { tokens: ok ? nextTokens : tokens, last: now });
+  return { ok, remaining: Math.max(0, Math.floor(ok ? nextTokens : tokens)) };
+}
+
+function enforceRateLimit({ req, res, method, path }) {
+  if (!rateLimitEnabled) return true;
+  const p = String(path || "");
+  if (!p) return true;
+  if (p === "/api/healthz" || p === "/api/metrics" || p.startsWith("/api/docs/") || p === "/swagger.html") return true;
+  const ip = getClientIp(req);
+  const m = String(method || "GET").toUpperCase();
+  const isLogin = m === "POST" && p === "/api/auth/login";
+  const isAuth = p.startsWith("/api/auth/");
+  const isWrite = !["GET", "HEAD", "OPTIONS"].includes(m);
+
+  const loginPerMin = process.env.ERP_RATE_LIMIT_LOGIN_PER_MIN ? Math.max(1, Number(process.env.ERP_RATE_LIMIT_LOGIN_PER_MIN) || 20) : 20;
+  const authPerMin = process.env.ERP_RATE_LIMIT_AUTH_PER_MIN ? Math.max(1, Number(process.env.ERP_RATE_LIMIT_AUTH_PER_MIN) || 120) : 120;
+  const writePerMin = process.env.ERP_RATE_LIMIT_WRITE_PER_MIN ? Math.max(1, Number(process.env.ERP_RATE_LIMIT_WRITE_PER_MIN) || 300) : 300;
+  const readPerMin = process.env.ERP_RATE_LIMIT_READ_PER_MIN ? Math.max(1, Number(process.env.ERP_RATE_LIMIT_READ_PER_MIN) || 1200) : 1200;
+
+  const perMs = (n) => n / 60_000;
+  const bucket =
+    isLogin ? { name: "login", cap: loginPerMin, rate: perMs(loginPerMin) } :
+    isAuth ? { name: "auth", cap: authPerMin, rate: perMs(authPerMin) } :
+    isWrite ? { name: "write", cap: writePerMin, rate: perMs(writePerMin) } :
+    { name: "read", cap: readPerMin, rate: perMs(readPerMin) };
+
+  const key = `rl:${bucket.name}:${ip}`;
+  const r = consumeRateLimitToken({ key, capacity: bucket.cap, refillPerMs: bucket.rate });
+  if (r.ok) return true;
+
+  res.setHeader("retry-after", "60");
+  json(res, 429, { error: "rate_limited", message: "too_many_requests" });
+  return false;
+}
+
+function jobDefaults(type) {
+  const t = normalizeString(type);
+  if (t === "import_db_export") {
+    return { priority: 50, maxAttempts: 5, retryBackoffMs: 2000, retryMaxBackoffMs: 60_000, lockTimeoutMs: 15 * 60_000 };
+  }
+  if (t === "reconcile_ahlert24_offer_vs_erp") {
+    return { priority: 80, maxAttempts: 3, retryBackoffMs: 5000, retryMaxBackoffMs: 5 * 60_000, lockTimeoutMs: 20 * 60_000 };
+  }
+  if (t === "reporting_mart_refresh") {
+    return { priority: 120, maxAttempts: 3, retryBackoffMs: 5000, retryMaxBackoffMs: 5 * 60_000, lockTimeoutMs: 30 * 60_000 };
+  }
+  if (t === "mobile_apply_ops") {
+    return { priority: 60, maxAttempts: 5, retryBackoffMs: 2000, retryMaxBackoffMs: 60_000, lockTimeoutMs: 30 * 60_000 };
+  }
+  if (t === "integrations_dispatch") {
+    return { priority: 90, maxAttempts: 10, retryBackoffMs: 5000, retryMaxBackoffMs: 10 * 60_000, lockTimeoutMs: 20 * 60_000 };
+  }
+  if (t === "notification_dispatch") {
+    return { priority: 70, maxAttempts: 5, retryBackoffMs: 2000, retryMaxBackoffMs: 5 * 60_000, lockTimeoutMs: 15 * 60_000 };
+  }
+  return { priority: 100, maxAttempts: 3, retryBackoffMs: 2000, retryMaxBackoffMs: 60_000, lockTimeoutMs: 15 * 60_000 };
+}
+
+function computeRetryDelayMs({ attempts, retryBackoffMs, retryMaxBackoffMs }) {
+  const a = Math.max(0, Number(attempts) || 0);
+  const base = Math.max(250, Number(retryBackoffMs) || 2000);
+  const max = Math.max(base, Number(retryMaxBackoffMs) || 60_000);
+  const d = Math.min(max, Math.round(base * Math.pow(2, Math.min(20, a))));
+  const jitter = Math.round(d * (Math.random() * 0.2));
+  return Math.min(max, d + jitter);
+}
+
+async function createJob({ type, requestedBy, params, priority = null, runAt = null, maxAttempts = null } = {}) {
   if (!pool) return { ok: false, error: "db_required" };
   const t = normalizeString(type);
   if (!t) return { ok: false, error: "type_required" };
+  const d = jobDefaults(t);
   const id = `job_${crypto.randomUUID().slice(0, 18)}`;
+  const prio = priority === null || priority === undefined ? d.priority : Math.max(0, Math.floor(Number(priority) || 0));
+  const maxA = maxAttempts === null || maxAttempts === undefined ? d.maxAttempts : Math.max(1, Math.floor(Number(maxAttempts) || 1));
+  let runAtIso = null;
+  if (runAt) {
+    const p = parseIsoDate(runAt);
+    runAtIso = p ? p.toISOString() : null;
+  }
   await pool.query(
     `
-    insert into job (id, type, status, requested_by, params, progress, total, error, created_at)
-    values ($1,$2,'queued',$3,$4,0,100,null, now());
+    insert into job (id, type, status, requested_by, params, progress, total, error, created_at, priority, run_at, attempts, max_attempts, retry_backoff_ms, retry_max_backoff_ms, last_error, last_error_at)
+    values ($1,$2,'queued',$3,$4,0,100,null, now(), $5, coalesce($6::timestamptz, now()), 0, $7, $8, $9, null, null);
     `,
-    [id, t, requestedBy, params && typeof params === "object" ? params : {}],
+    [
+      id,
+      t,
+      requestedBy,
+      params && typeof params === "object" ? params : {},
+      prio,
+      runAtIso,
+      maxA,
+      d.retryBackoffMs,
+      d.retryMaxBackoffMs,
+    ],
   );
   return { ok: true, id };
 }
@@ -1230,7 +3819,7 @@ async function setJobProgress({ jobId, progress, total }) {
 
 async function finishJob({ jobId, status, error }) {
   if (!pool) return;
-  const st = ["succeeded", "failed", "cancelled"].includes(status) ? status : "failed";
+  const st = ["succeeded", "failed", "cancelled", "dead"].includes(status) ? status : "failed";
   await pool
     .query(
       `
@@ -1242,6 +3831,128 @@ async function finishJob({ jobId, status, error }) {
     )
     .catch(() => {});
   publishEvent("jobs", "job_finished", { jobId, status: st });
+}
+
+async function deadLetterJob({ jobId, reason, errorMessage }) {
+  if (!pool) return;
+  const r = await pool
+    .query(
+      `
+      with j as (
+        select id, type, requested_by, params, attempts, max_attempts, created_at
+        from job
+        where id = $1
+        limit 1
+      )
+      insert into job_dead_letter (id, job_id, job_type, requested_by, params, attempts, max_attempts, reason, error, created_at)
+      select $2, j.id, j.type, j.requested_by, j.params, j.attempts, j.max_attempts, $3, $4, now()
+      from j
+      on conflict (job_id) do nothing
+      returning job_id;
+      `,
+      [jobId, `jdlq_${crypto.randomUUID().slice(0, 18)}`, String(reason || "max_attempts_exceeded"), errorMessage ? String(errorMessage).slice(0, 2000) : null],
+    )
+    .then((x) => x.rows[0] || null)
+    .catch(() => null);
+  await pool
+    .query(
+      `
+      update job
+      set status = 'dead', finished_at = now(), error = $2, dead_lettered_at = now(), dead_letter_reason = $3
+      where id = $1;
+      `,
+      [jobId, errorMessage ? String(errorMessage).slice(0, 2000) : null, String(reason || "max_attempts_exceeded").slice(0, 200)],
+    )
+    .catch(() => {});
+  if (r) publishEvent("jobs", "job_dead_lettered", { jobId });
+}
+
+async function handleJobFailure({ jobId, workerId, errorMessage }) {
+  if (!pool) return;
+  const row = await pool
+    .query(
+      `
+      update job
+      set last_error = $2, last_error_at = now()
+      where id = $1
+      returning attempts, max_attempts, retry_backoff_ms, retry_max_backoff_ms;
+      `,
+      [jobId, errorMessage ? String(errorMessage).slice(0, 2000) : null],
+    )
+    .then((r) => r.rows[0] || null)
+    .catch(() => null);
+  const attempts = Number(row?.attempts) || 0;
+  const maxAttempts = Math.max(1, Number(row?.max_attempts) || 1);
+  const nextAttempt = attempts + 1;
+  if (nextAttempt >= maxAttempts) {
+    await pool
+      .query(
+        `
+        update job
+        set attempts = $2,
+            locked_at = null,
+            locked_by = null
+        where id = $1;
+        `,
+        [jobId, nextAttempt],
+      )
+      .catch(() => {});
+    await appendJobLog({ jobId, level: "error", message: "job_dead_lettered", meta: { workerId, attempts: nextAttempt, maxAttempts } });
+    await deadLetterJob({ jobId, reason: "max_attempts_exceeded", errorMessage });
+    return;
+  }
+  const delayMs = computeRetryDelayMs({
+    attempts: nextAttempt,
+    retryBackoffMs: Number(row?.retry_backoff_ms) || 2000,
+    retryMaxBackoffMs: Number(row?.retry_max_backoff_ms) || 60_000,
+  });
+  await pool
+    .query(
+      `
+      update job
+      set status = 'queued',
+          locked_at = null,
+          locked_by = null,
+          attempts = $2,
+          run_at = now() + ($3::int * interval '1 millisecond'),
+          error = $4
+      where id = $1;
+      `,
+      [jobId, nextAttempt, delayMs, errorMessage ? String(errorMessage).slice(0, 2000) : null],
+    )
+    .catch(() => {});
+  await appendJobLog({ jobId, level: "warning", message: "job_retry_scheduled", meta: { workerId, attempts: nextAttempt, maxAttempts, delayMs } });
+  publishEvent("jobs", "job_retry_scheduled", { jobId, attempts: nextAttempt, delayMs });
+}
+
+async function recoverStaleRunningJobs({ workerId }) {
+  if (!pool) return;
+  const lockTimeoutMs = 15 * 60_000;
+  const rows = await pool
+    .query(
+      `
+      update job
+      set status = 'queued',
+          locked_at = null,
+          locked_by = null,
+          run_at = now(),
+          last_error = coalesce(last_error, 'stale_lock_requeued'),
+          last_error_at = now()
+      where status = 'running'
+        and locked_at is not null
+        and locked_at < now() - ($1::int * interval '1 millisecond')
+        and finished_at is null
+      returning id;
+      `,
+      [lockTimeoutMs],
+    )
+    .then((r) => r.rows)
+    .catch(() => []);
+  for (const r of rows) {
+    const jobId = r.id;
+    await appendJobLog({ jobId, level: "warning", message: "job_stale_lock_requeued", meta: { workerId } });
+    publishEvent("jobs", "job_stale_lock_requeued", { jobId });
+  }
 }
 
 async function claimNextJob({ workerId }) {
@@ -1256,7 +3967,8 @@ async function claimNextJob({ workerId }) {
           select id
           from job
           where status = 'queued'
-          order by created_at asc
+            and run_at <= now()
+          order by priority asc, run_at asc, created_at asc
           limit 1
           for update skip locked
         )
@@ -1264,7 +3976,7 @@ async function claimNextJob({ workerId }) {
         set status = 'running', started_at = coalesce(started_at, now()), locked_at = now(), locked_by = $1
         from picked
         where j.id = picked.id
-        returning j.id, j.type, j.requested_by, j.params;
+        returning j.id, j.type, j.requested_by, j.params, j.attempts, j.max_attempts;
         `,
         [workerId],
       )
@@ -1281,10 +3993,10 @@ async function claimNextJob({ workerId }) {
   }
 }
 
-async function runJob({ job }) {
+async function runJob({ job, workerId = null }) {
   const jobId = job.id;
   const type = String(job.type || "");
-  await appendJobLog({ jobId, level: "info", message: "job_started", meta: { type } });
+  await appendJobLog({ jobId, level: "info", message: "job_started", meta: { type, workerId: workerId || null } });
   await setJobProgress({ jobId, progress: 1 });
   try {
     if (type === "import_db_export") {
@@ -1297,11 +4009,648 @@ async function runJob({ job }) {
       await finishJob({ jobId, status: "succeeded", error: null });
       return;
     }
+    if (type === "reconcile_ahlert24_offer_vs_erp") {
+      await setJobProgress({ jobId, progress: 5 });
+      const mode = normalizeString(job.params && job.params.mode) || "live";
+      const result = await runAhlert24Reconcile({ requestedBy: job.requested_by, mode });
+      const runId = await persistReconcileResult({ requestedBy: job.requested_by, result });
+      await setJobProgress({ jobId, progress: 70 });
+      const sync = await applyAhlert24CatalogSync({ runId, result, actor: job.requested_by });
+      await setJobProgress({ jobId, progress: 95 });
+      await appendJobLog({ jobId, level: "info", message: "reconcile_finished", meta: { runId, mode, summary: result.summary || {}, catalogSync: sync } });
+      await finishJob({ jobId, status: "succeeded", error: null });
+      return;
+    }
+    if (type === "reporting_mart_refresh") {
+      await setJobProgress({ jobId, progress: 5 });
+      const fromDay = normalizeString(job.params && job.params.fromDay) || null;
+      const toDay = normalizeString(job.params && job.params.toDay) || null;
+      const r = await refreshReportingMart({ fromDay, toDay, requestedBy: job.requested_by });
+      if (!r.ok) throw new Error(r.error || "mart_refresh_failed");
+      await setJobProgress({ jobId, progress: 95 });
+      await appendJobLog({ jobId, level: "info", message: "reporting_mart_refreshed", meta: { fromDay: r.fromDay, toDay: r.toDay } });
+      await finishJob({ jobId, status: "succeeded", error: null });
+      return;
+    }
+    if (type === "mobile_apply_ops") {
+      await setJobProgress({ jobId, progress: 5 });
+      const deviceId = normalizeDeviceId(job.params && job.params.deviceId);
+      const opIds = Array.isArray(job.params && job.params.opIds) ? job.params.opIds.map((x) => normalizeString(x)).filter(Boolean) : [];
+      if (!deviceId) throw new Error("deviceId_required");
+      if (opIds.length === 0) throw new Error("opIds_required");
+
+      let applied = 0;
+      for (const opId of opIds) {
+        const row = await pool
+          .query(
+            `
+            update mobile_sync_op
+            set status = 'running',
+                attempt_no = attempt_no + 1,
+                updated_at = now(),
+                error_code = null,
+                error_message = null
+            where device_id = $1 and op_id = $2 and status in ('queued','failed')
+            returning id, device_id, op_id, op_type, payload, created_by;
+            `,
+            [deviceId, opId],
+          )
+          .then((r) => r.rows[0] || null)
+          .catch(() => null);
+        if (!row) continue;
+
+        const r = await applyMobileOp({ deviceId, opRow: row });
+        if (r.ok) {
+          await pool
+            .query(
+              `
+              update mobile_sync_op
+              set status = 'applied',
+                  result = $3::jsonb,
+                  applied_at = now(),
+                  updated_at = now()
+              where id = $1 and device_id = $2;
+              `,
+              [row.id, deviceId, JSON.stringify(r.result || {})],
+            )
+            .catch(() => {});
+          applied += 1;
+        } else {
+          await pool
+            .query(
+              `
+              update mobile_sync_op
+              set status = 'failed',
+                  error_code = $3,
+                  error_message = $4,
+                  updated_at = now()
+              where id = $1 and device_id = $2;
+              `,
+              [row.id, deviceId, normalizeKey(r.error || "apply_failed") || "apply_failed", String(r.error || "apply_failed").slice(0, 2000)],
+            )
+            .catch(() => {});
+        }
+      }
+
+      await setJobProgress({ jobId, progress: 95 });
+      await appendJobLog({ jobId, level: "info", message: "mobile_ops_applied", meta: { deviceId, opCount: opIds.length, applied } });
+      await finishJob({ jobId, status: "succeeded", error: null });
+      return;
+    }
+    if (type === "integrations_dispatch") {
+      await setJobProgress({ jobId, progress: 5 });
+      const r = await runIntegrationsDispatchJob({ job, workerId: workerId || null });
+      await setJobProgress({ jobId, progress: 95 });
+      await appendJobLog({ jobId, level: "info", message: "integrations_dispatched", meta: r && typeof r === "object" ? r : {} });
+      await finishJob({ jobId, status: "succeeded", error: null });
+      return;
+    }
+    if (type === "notification_dispatch") {
+      await setJobProgress({ jobId, progress: 5 });
+      const r = await runNotificationDispatchJob({ job, workerId: workerId || null });
+      await setJobProgress({ jobId, progress: 95 });
+      await appendJobLog({ jobId, level: "info", message: "notification_dispatched", meta: r && typeof r === "object" ? r : {} });
+      await finishJob({ jobId, status: "succeeded", error: null });
+      return;
+    }
     throw new Error("unknown_job_type");
   } catch (e) {
-    await appendJobLog({ jobId, level: "error", message: "job_failed", meta: { error: String(e && e.message ? e.message : e) } });
-    await finishJob({ jobId, status: "failed", error: String(e && e.message ? e.message : e) });
+    const errorMessage = String(e && e.message ? e.message : e);
+    await appendJobLog({ jobId, level: "error", message: "job_failed", meta: { error: errorMessage } });
+    await handleJobFailure({ jobId, workerId: workerId || null, errorMessage });
   }
+}
+
+function normalizeFinanceEntryType(v) {
+  const t = normalizeString(v);
+  if (t === "revenue" || t === "cost") return t;
+  return "";
+}
+
+function normalizeFinanceObjectType(v) {
+  const t = normalizeString(v);
+  return t;
+}
+
+async function createFinanceEntry({
+  entryType,
+  objectType,
+  objectId,
+  currency = "EUR",
+  amountCents,
+  occurredAt = null,
+  costCenter = null,
+  account = null,
+  sourceModule,
+  sourceRefType = null,
+  sourceRefId = null,
+  meta = null,
+  createdBy,
+} = {}) {
+  if (!pool) return { ok: false, error: "db_required" };
+  const et = normalizeFinanceEntryType(entryType);
+  if (!et) return { ok: false, error: "entryType_required" };
+  const ot = normalizeFinanceObjectType(objectType);
+  if (!ot) return { ok: false, error: "objectType_required" };
+  const oid = normalizeString(objectId);
+  if (!oid) return { ok: false, error: "objectId_required" };
+  const cur = normalizeString(currency) || "EUR";
+  if (!/^[A-Z]{3}$/.test(cur)) return { ok: false, error: "invalid_currency" };
+  const amount = Math.round(Number(amountCents));
+  if (!Number.isFinite(amount) || amount < 0) return { ok: false, error: "amountCents_invalid" };
+  const sm = normalizeString(sourceModule);
+  if (!sm) return { ok: false, error: "sourceModule_required" };
+  const by = normalizeString(createdBy);
+  if (!by) return { ok: false, error: "createdBy_required" };
+  const occ = occurredAt ? parseIsoDate(occurredAt) : null;
+  const occurred = occ ? occ.toISOString() : new Date().toISOString();
+  const id = `fe_${crypto.randomUUID().slice(0, 18)}`;
+  const cc = normalizeString(costCenter) || null;
+  const acc = normalizeString(account) || null;
+  const srt = normalizeString(sourceRefType) || null;
+  const sri = normalizeString(sourceRefId) || null;
+  const m = meta && typeof meta === "object" ? meta : {};
+
+  const row = await pool
+    .query(
+      `
+      insert into finance_entry
+        (id, entry_type, object_type, object_id, currency, amount_cents, occurred_at, cost_center, account, source_module, source_ref_type, source_ref_id, meta, created_by, created_at)
+      values
+        ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb,$14, now())
+      on conflict (source_module, source_ref_type, source_ref_id, entry_type) do nothing
+      returning id;
+      `,
+      [id, et, ot, oid, cur, amount, occurred, cc, acc, sm, srt, sri, JSON.stringify(m), by],
+    )
+    .then((r) => r.rows[0] || null)
+    .catch(() => null);
+
+  return { ok: true, id: row ? row.id : null };
+}
+
+async function listFinanceEntries({
+  objectType = null,
+  objectId = null,
+  entryType = null,
+  costCenter = null,
+  from = null,
+  to = null,
+  limit = 200,
+} = {}) {
+  if (!pool) return { ok: false, error: "db_required" };
+  const where = [];
+  const params = [];
+  const add = (sql, val) => {
+    params.push(val);
+    where.push(sql.replace("?", `$${params.length}`));
+  };
+  const ot = objectType ? normalizeFinanceObjectType(objectType) : null;
+  const oid = objectId ? normalizeString(objectId) : null;
+  const et = entryType ? normalizeFinanceEntryType(entryType) : null;
+  const cc = costCenter ? normalizeString(costCenter) : null;
+  const fromDt = from ? parseIsoDate(from) : null;
+  const toDt = to ? parseIsoDate(to) : null;
+  if (ot) add("object_type = ?", ot);
+  if (oid) add("object_id = ?", oid);
+  if (et) add("entry_type = ?", et);
+  if (cc) add("cost_center = ?", cc);
+  if (fromDt) add("occurred_at >= ?::timestamptz", fromDt.toISOString());
+  if (toDt) add("occurred_at <= ?::timestamptz", toDt.toISOString());
+  const n = Math.max(1, Math.min(1000, Number(limit) || 200));
+  const whereSql = where.length ? `where ${where.join(" and ")}` : "";
+  const rows = await pool
+    .query(
+      `
+      select id, entry_type, object_type, object_id, currency, amount_cents, occurred_at, cost_center, account, source_module, source_ref_type, source_ref_id, meta, created_by, created_at
+      from finance_entry
+      ${whereSql}
+      order by occurred_at desc, id desc
+      limit ${n};
+      `,
+      params,
+    )
+    .then((r) => r.rows)
+    .catch(() => []);
+  return {
+    ok: true,
+    items: rows.map((r) => ({
+      id: r.id,
+      entryType: r.entry_type,
+      objectType: r.object_type,
+      objectId: r.object_id,
+      currency: r.currency,
+      amountCents: Number(r.amount_cents),
+      occurredAt: new Date(r.occurred_at).toISOString(),
+      costCenter: r.cost_center || null,
+      account: r.account || null,
+      sourceModule: r.source_module,
+      sourceRefType: r.source_ref_type || null,
+      sourceRefId: r.source_ref_id || null,
+      meta: r.meta || {},
+      createdBy: r.created_by,
+      createdAt: new Date(r.created_at).toISOString(),
+    })),
+  };
+}
+
+async function computeContribution({ objectType, objectId, from = null, to = null } = {}) {
+  if (!pool) return { ok: false, error: "db_required" };
+  const ot = normalizeFinanceObjectType(objectType);
+  if (!ot) return { ok: false, error: "objectType_required" };
+  const oid = normalizeString(objectId);
+  if (!oid) return { ok: false, error: "objectId_required" };
+  const fromDt = from ? parseIsoDate(from) : null;
+  const toDt = to ? parseIsoDate(to) : null;
+  const rows = await pool
+    .query(
+      `
+      select entry_type, currency, sum(amount_cents)::bigint as amount_cents
+      from finance_entry
+      where object_type = $1
+        and object_id = $2
+        and ($3::timestamptz is null or occurred_at >= $3::timestamptz)
+        and ($4::timestamptz is null or occurred_at <= $4::timestamptz)
+      group by entry_type, currency;
+      `,
+      [ot, oid, fromDt ? fromDt.toISOString() : null, toDt ? toDt.toISOString() : null],
+    )
+    .then((r) => r.rows)
+    .catch(() => []);
+  const byCurrency = new Map();
+  for (const r of rows) {
+    const cur = String(r.currency || "EUR");
+    const et = String(r.entry_type || "");
+    const amt = Number(r.amount_cents) || 0;
+    const curAgg = byCurrency.get(cur) || { currency: cur, revenueCents: 0, costCents: 0 };
+    if (et === "revenue") curAgg.revenueCents += amt;
+    if (et === "cost") curAgg.costCents += amt;
+    byCurrency.set(cur, curAgg);
+  }
+  const totals = Array.from(byCurrency.values()).map((x) => ({
+    currency: x.currency,
+    revenueCents: x.revenueCents,
+    costCents: x.costCents,
+    contributionCents: x.revenueCents - x.costCents,
+  }));
+  return { ok: true, totals };
+}
+
+function normalizeDateOnly(value) {
+  const v = normalizeString(value);
+  if (!v) return null;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) return null;
+  return v;
+}
+
+function normalizeDeviceId(value) {
+  const v = normalizeKey(value);
+  return v ? String(v).slice(0, 64) : null;
+}
+
+function isLocalMobileId(value) {
+  const v = normalizeString(value);
+  if (!v) return false;
+  return v.startsWith("local_") || v.startsWith("client_") || v.startsWith("tmp_");
+}
+
+async function resolveMobileId({ deviceId, entityType, id }) {
+  if (!pool) return null;
+  const dev = normalizeDeviceId(deviceId);
+  const et = normalizeKey(entityType);
+  const v = normalizeString(id);
+  if (!dev || !et || !v) return v || null;
+  if (!isLocalMobileId(v)) return v;
+  const row = await pool
+    .query(
+      `
+      select server_id
+      from mobile_id_map
+      where device_id = $1 and entity_type = $2 and local_id = $3
+      limit 1;
+      `,
+      [dev, et, v],
+    )
+    .then((r) => r.rows[0] || null)
+    .catch(() => null);
+  return row ? row.server_id : null;
+}
+
+async function upsertMobileIdMap({ deviceId, entityType, localId, serverId, username }) {
+  if (!pool) return { ok: false, error: "db_required" };
+  const dev = normalizeDeviceId(deviceId);
+  const et = normalizeKey(entityType);
+  const local = normalizeString(localId);
+  const server = normalizeString(serverId);
+  const u = normalizeString(username);
+  if (!dev) return { ok: false, error: "deviceId_required" };
+  if (!et) return { ok: false, error: "entityType_required" };
+  if (!local) return { ok: false, error: "localId_required" };
+  if (!server) return { ok: false, error: "serverId_required" };
+  if (!u) return { ok: false, error: "username_required" };
+  await pool
+    .query(
+      `
+      insert into mobile_id_map (device_id, entity_type, local_id, server_id, created_by, created_at)
+      values ($1,$2,$3,$4,$5, now())
+      on conflict (device_id, entity_type, local_id) do update
+        set server_id = excluded.server_id;
+      `,
+      [dev, et, local, server, u],
+    )
+    .catch(() => {});
+  return { ok: true };
+}
+
+async function enqueueMobileOp({ deviceId, opId, opType, occurredAt = null, payload = null, username }) {
+  if (!pool) return { ok: false, error: "db_required" };
+  const dev = normalizeDeviceId(deviceId);
+  const oid = normalizeString(opId);
+  const t = normalizeKey(opType);
+  const u = normalizeString(username);
+  if (!dev) return { ok: false, error: "deviceId_required" };
+  if (!oid) return { ok: false, error: "opId_required" };
+  if (!t) return { ok: false, error: "opType_required" };
+  if (!u) return { ok: false, error: "username_required" };
+  const occ = occurredAt ? parseIsoDate(occurredAt) : null;
+  const id = `mop_${crypto.randomUUID().slice(0, 18)}`;
+  const p = payload && typeof payload === "object" ? payload : {};
+  const row = await pool
+    .query(
+      `
+      insert into mobile_sync_op
+        (id, device_id, op_id, op_type, occurred_at, payload, status, attempt_no, result, created_by, created_at, updated_at)
+      values
+        ($1,$2,$3,$4,$5,$6::jsonb,'queued',0,'{}'::jsonb,$7, now(), now())
+      on conflict (device_id, op_id) do nothing
+      returning id;
+      `,
+      [id, dev, oid, t, occ ? occ.toISOString() : null, JSON.stringify(p), u],
+    )
+    .then((r) => r.rows[0] || null)
+    .catch(() => null);
+  return { ok: true, id: row ? row.id : null };
+}
+
+async function listMobileOps({ deviceId, status = null, limit = 100 } = {}) {
+  if (!pool) return [];
+  const dev = normalizeDeviceId(deviceId);
+  if (!dev) return [];
+  const st = status ? normalizeKey(status) : null;
+  const n = Math.max(1, Math.min(500, Number(limit) || 100));
+  const rows = await pool
+    .query(
+      `
+      select id, op_id, op_type, occurred_at, payload, status, attempt_no, result, error_code, error_message, created_by, created_at, updated_at, applied_at
+      from mobile_sync_op
+      where device_id = $1
+        and ($2::text is null or status = $2)
+      order by created_at desc, id desc
+      limit $3;
+      `,
+      [dev, st, n],
+    )
+    .then((r) => r.rows)
+    .catch(() => []);
+  return rows.map((r) => ({
+    id: r.id,
+    opId: r.op_id,
+    opType: r.op_type,
+    occurredAt: r.occurred_at ? new Date(r.occurred_at).toISOString() : null,
+    status: r.status,
+    attemptNo: Number(r.attempt_no) || 0,
+    result: r.result || {},
+    errorCode: r.error_code || null,
+    errorMessage: r.error_message || null,
+    createdBy: r.created_by,
+    createdAt: new Date(r.created_at).toISOString(),
+    updatedAt: new Date(r.updated_at).toISOString(),
+    appliedAt: r.applied_at ? new Date(r.applied_at).toISOString() : null,
+  }));
+}
+
+async function applyMobileOp({ deviceId, opRow }) {
+  const dev = normalizeDeviceId(deviceId);
+  if (!dev || !opRow) return { ok: false, error: "invalid_op" };
+  const opType = normalizeKey(opRow.op_type);
+  const payload = opRow.payload && typeof opRow.payload === "object" ? opRow.payload : {};
+  const username = normalizeString(opRow.created_by) || "mobile";
+
+  if (opType === "workshop_case_create") {
+    const clientCaseId = normalizeString(payload.clientCaseId) || null;
+    const vehicleId = normalizeString(payload.vehicleId);
+    const title = normalizeString(payload.title);
+    const description = normalizeString(payload.description);
+    const severity = normalizeString(payload.severity) || "warning";
+    const lockType = normalizeString(payload.lockType) || null;
+    const priority = normalizeString(payload.priority) || null;
+    const reporterRole = normalizeString(payload.reporterRole) || "workshop";
+    const photo = payload.photo && typeof payload.photo === "object" ? payload.photo : null;
+    const openedAt = normalizeString(payload.openedAt) || null;
+    if (!vehicleId) return { ok: false, error: "vehicleId_required" };
+    if (!title) return { ok: false, error: "title_required" };
+    if (photo && typeof photo.base64 === "string" && photo.base64.length > 2_000_000) return { ok: false, error: "photo_too_large" };
+    const r = await createWorkshopCase({ vehicleId, title, description, severity, lockType, priority, reporterRole, photo, openedAt, username });
+    if (!r.ok) return { ok: false, error: r.error || "create_failed" };
+    const caseId = r.item?.id || null;
+    if (clientCaseId && caseId) await upsertMobileIdMap({ deviceId: dev, entityType: "workshop_case", localId: clientCaseId, serverId: caseId, username });
+    return { ok: true, result: { caseId, clientCaseId } };
+  }
+
+  if (opType === "workshop_case_status") {
+    const rawCaseId = normalizeString(payload.caseId);
+    if (!rawCaseId) return { ok: false, error: "caseId_required" };
+    const caseId = await resolveMobileId({ deviceId: dev, entityType: "workshop_case", id: rawCaseId });
+    if (!caseId) return { ok: false, error: "caseId_unresolved" };
+    const workState = normalizeString(payload.workState);
+    const reason = normalizeString(payload.reason) || "status_changed";
+    const r = await setWorkshopCaseState({
+      caseId,
+      workState,
+      interrupted: payload.interrupted === true,
+      deliveryDelay: payload.deliveryDelay === true,
+      reason,
+      username,
+    });
+    if (!r.ok) return { ok: false, error: r.error || "status_failed" };
+    return { ok: true, result: { caseId, workState: r.item?.workState || null } };
+  }
+
+  if (opType === "workshop_case_message") {
+    const rawCaseId = normalizeString(payload.caseId);
+    const message = normalizeString(payload.message);
+    if (!rawCaseId) return { ok: false, error: "caseId_required" };
+    if (!message) return { ok: false, error: "message_required" };
+    if (message.length > 5000) return { ok: false, error: "message_too_long" };
+    const caseId = await resolveMobileId({ deviceId: dev, entityType: "workshop_case", id: rawCaseId });
+    if (!caseId) return { ok: false, error: "caseId_unresolved" };
+    const c = await getWorkshopCaseById(caseId);
+    if (!c) return { ok: false, error: "case_not_found" };
+    const id = `wsm_${crypto.randomUUID().slice(0, 12)}`;
+    const createdAt = new Date().toISOString();
+    const row = await pool
+      .query(
+        `
+        insert into workshop_case_message (id, case_id, message, username, created_at)
+        values ($1, $2, $3, $4, $5)
+        returning id, case_id, created_at;
+        `,
+        [id, caseId, message, username, createdAt],
+      )
+      .then((r) => r.rows[0] || null)
+      .catch(() => null);
+    if (!row) return { ok: false, error: "message_insert_failed" };
+    await insertAuditLog({
+      id: `al_${crypto.randomUUID()}`,
+      eventType: "WORKSHOP_CASE_MESSAGE_CREATED",
+      username,
+      occurredAt: createdAt,
+      lockType: null,
+      blockId: null,
+      vehicleId: c.vehicleId,
+      blockReason: null,
+      overrideId: caseId,
+      overrideReason: null,
+      meta: { caseId, messageId: id, source: "mobile_sync" },
+    }).catch(() => {});
+    await publishErpEvent({
+      eventType: "WORKSHOP_CASE_MESSAGE_CREATED",
+      aggregateType: "workshop_case",
+      aggregateId: caseId,
+      createdBy: username,
+      payload: { caseId, messageId: id, source: "mobile_sync" },
+    }).catch(() => {});
+    return { ok: true, result: { caseId, messageId: id } };
+  }
+
+  return { ok: false, error: "unsupported_op_type" };
+}
+
+function defaultMartRangeDays() {
+  const now = new Date();
+  const toDay = now.toISOString().slice(0, 10);
+  const from = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+  const fromDay = from.toISOString().slice(0, 10);
+  return { fromDay, toDay };
+}
+
+async function refreshReportingMart({ fromDay = null, toDay = null, requestedBy = null } = {}) {
+  if (!pool) return { ok: false, error: "db_required" };
+  const dflt = defaultMartRangeDays();
+  const fromD = normalizeDateOnly(fromDay) || dflt.fromDay;
+  const toD = normalizeDateOnly(toDay) || dflt.toDay;
+  if (toD < fromD) return { ok: false, error: "invalid_range" };
+
+  await pool.query(
+    `
+    insert into rpt_waste_order_fact
+      (order_id, customer_ref_id, contract_id, municipality_id, disposal_site_id, status, service_type, container_source_key, material_code, planned_tons, planned_volume_cbm, created_at, updated_at,
+       invoice_draft_id, invoice_currency, invoice_total_cents, invoiced_at, last_refreshed_at)
+    select
+      o.id,
+      o.customer_ref_id,
+      o.contract_id,
+      o.municipality_id,
+      o.disposal_site_id,
+      o.status,
+      o.service_type,
+      o.container_source_key,
+      o.material_code,
+      o.planned_tons,
+      o.planned_volume_cbm,
+      o.created_at,
+      o.updated_at,
+      i.id as invoice_draft_id,
+      i.currency as invoice_currency,
+      i.total_cents as invoice_total_cents,
+      i.created_at as invoiced_at,
+      now() as last_refreshed_at
+    from waste_container_order o
+    left join lateral (
+      select id, currency, total_cents as total_cents, created_at
+      from waste_invoice_draft
+      where order_id = o.id
+      order by created_at desc
+      limit 1
+    ) i on true
+    where o.updated_at >= ($1::date)::timestamptz
+      and o.updated_at < (($2::date + 1)::timestamptz)
+    on conflict (order_id) do update set
+      customer_ref_id = excluded.customer_ref_id,
+      contract_id = excluded.contract_id,
+      municipality_id = excluded.municipality_id,
+      disposal_site_id = excluded.disposal_site_id,
+      status = excluded.status,
+      service_type = excluded.service_type,
+      container_source_key = excluded.container_source_key,
+      material_code = excluded.material_code,
+      planned_tons = excluded.planned_tons,
+      planned_volume_cbm = excluded.planned_volume_cbm,
+      created_at = excluded.created_at,
+      updated_at = excluded.updated_at,
+      invoice_draft_id = excluded.invoice_draft_id,
+      invoice_currency = excluded.invoice_currency,
+      invoice_total_cents = excluded.invoice_total_cents,
+      invoiced_at = excluded.invoiced_at,
+      last_refreshed_at = excluded.last_refreshed_at;
+    `,
+    [fromD, toD],
+  );
+
+  await pool.query(`delete from rpt_finance_daily where day >= $1::date and day <= $2::date;`, [fromD, toD]);
+  await pool.query(
+    `
+    insert into rpt_finance_daily (day, currency, cost_center, revenue_cents, cost_cents, contribution_cents, last_refreshed_at)
+    select
+      date_trunc('day', occurred_at)::date as day,
+      currency,
+      cost_center,
+      sum(case when entry_type = 'revenue' then amount_cents else 0 end)::bigint as revenue_cents,
+      sum(case when entry_type = 'cost' then amount_cents else 0 end)::bigint as cost_cents,
+      sum(case when entry_type = 'revenue' then amount_cents else -amount_cents end)::bigint as contribution_cents,
+      now() as last_refreshed_at
+    from finance_entry
+    where occurred_at >= ($1::date)::timestamptz
+      and occurred_at < (($2::date + 1)::timestamptz)
+    group by 1,2,3;
+    `,
+    [fromD, toD],
+  );
+
+  await pool.query(`delete from rpt_waste_daily where day >= $1::date and day <= $2::date;`, [fromD, toD]);
+  await pool.query(
+    `
+    with days as (
+      select generate_series($1::date, $2::date, interval '1 day')::date as day
+    ),
+    created as (
+      select created_at::date as day, count(*)::int as orders_created, coalesce(sum(planned_tons), 0)::double precision as planned_tons
+      from waste_container_order
+      where created_at >= ($1::date)::timestamptz and created_at < (($2::date + 1)::timestamptz)
+      group by 1
+    ),
+    invoiced as (
+      select created_at::date as day, count(*)::int as orders_invoiced, coalesce(sum(total_cents), 0)::bigint as invoice_revenue_cents
+      from waste_invoice_draft
+      where created_at >= ($1::date)::timestamptz and created_at < (($2::date + 1)::timestamptz)
+      group by 1
+    )
+    insert into rpt_waste_daily (day, orders_created, orders_invoiced, invoice_revenue_cents, planned_tons, last_refreshed_at)
+    select
+      d.day,
+      coalesce(c.orders_created, 0),
+      coalesce(i.orders_invoiced, 0),
+      coalesce(i.invoice_revenue_cents, 0),
+      coalesce(c.planned_tons, 0),
+      now()
+    from days d
+    left join created c on c.day = d.day
+    left join invoiced i on i.day = d.day;
+    `,
+    [fromD, toD],
+  );
+
+  return { ok: true, fromDay: fromD, toDay: toD, requestedBy: normalizeString(requestedBy) || null };
 }
 
 function requirePermission(res, auth, permission) {
@@ -1319,7 +4668,16 @@ function requireAnyPermission(res, auth, permissions) {
   return forbidden(res);
 }
 
+function requirePortal(res, portalAuth, types = null) {
+  if (!portalAuth || !portalAuth.accountId) return unauthorized(res);
+  const allowed = Array.isArray(types) ? types.map((x) => normalizeString(x)).filter(Boolean) : [];
+  if (!allowed.length) return true;
+  if (allowed.includes(normalizeString(portalAuth.portalType))) return true;
+  return forbidden(res);
+}
+
 function json(res, status, body) {
+  setResponseObsError(res, body);
   const payload = JSON.stringify(body);
   res.writeHead(status, {
     "content-type": "application/json; charset=utf-8",
@@ -1350,6 +4708,194 @@ function methodNotAllowed(res) {
 
 function normalizeString(s) {
   return typeof s === "string" ? s.trim() : "";
+}
+
+function sendBinary(res, status, buf, { contentType = "application/octet-stream", filename = null } = {}) {
+  const headers = {
+    "content-type": contentType,
+    "content-length": buf.length,
+    "cache-control": "no-store",
+  };
+  if (filename) headers["content-disposition"] = `inline; filename="${String(filename).replaceAll('"', "")}"`;
+  res.writeHead(status, headers);
+  res.end(buf);
+}
+
+const DocumentTypes = new Set(["contract", "weigh_slip", "mission_report", "inspection_protocol", "photo", "pdf", "scan", "video"]);
+const docStoreDir = normalizeString(process.env.ERP_DOC_STORE_DIR) || "/data/documents";
+const docMaxBytes = process.env.ERP_DOC_MAX_BYTES ? Math.max(1_000_000, Math.min(100_000_000, Number(process.env.ERP_DOC_MAX_BYTES) || 20_000_000)) : 20_000_000;
+const docOcrLanguages = normalizeString(process.env.ERP_OCR_LANGUAGES) || "deu+eng";
+const docMediaTmpDir = normalizeString(process.env.ERP_MEDIA_TMP_DIR) || "/tmp/erp-media";
+
+function normalizeDocumentType(value) {
+  const v = normalizeString(value).toLowerCase();
+  if (!v || !DocumentTypes.has(v)) return null;
+  return v;
+}
+
+function normalizeMimeType(value) {
+  const v = normalizeString(value).toLowerCase();
+  if (!v) return null;
+  if (!/^[a-z0-9.+-]+\/[a-z0-9.+-]+$/.test(v)) return null;
+  return v;
+}
+
+function allowedMimeForDocumentType(docType) {
+  const t = normalizeDocumentType(docType);
+  if (!t) return [];
+  if (t === "photo") return ["image/jpeg", "image/png", "image/webp"];
+  if (t === "video") return ["video/mp4", "video/quicktime", "video/webm"];
+  if (t === "scan" || t === "pdf" || t === "contract" || t === "weigh_slip" || t === "mission_report" || t === "inspection_protocol") return ["application/pdf", "image/jpeg", "image/png", "image/webp", "text/plain"];
+  return [];
+}
+
+function fileExtFromMime(mimeType) {
+  const m = normalizeMimeType(mimeType);
+  if (m === "application/pdf") return "pdf";
+  if (m === "image/jpeg") return "jpg";
+  if (m === "image/png") return "png";
+  if (m === "image/webp") return "webp";
+  if (m === "text/plain") return "txt";
+  if (m === "video/mp4") return "mp4";
+  if (m === "video/quicktime") return "mov";
+  if (m === "video/webm") return "webm";
+  return "bin";
+}
+
+function decodeBase64ToBuffer(b64) {
+  const raw = normalizeString(b64);
+  if (!raw) return null;
+  try {
+    const buf = Buffer.from(raw, "base64");
+    if (!buf.length) return null;
+    if (buf.length > docMaxBytes) return { error: "document_too_large", sizeBytes: buf.length };
+    return { buf };
+  } catch {
+    return null;
+  }
+}
+
+async function ensureDirExists(absDir) {
+  const p = String(absDir || "");
+  if (!p) return;
+  await fs.promises.mkdir(p, { recursive: true }).catch(() => {});
+}
+
+async function writeFileAtomic(absPath, buf) {
+  const target = String(absPath || "");
+  if (!target) return { ok: false, error: "path_required" };
+  const dir = path.dirname(target);
+  await ensureDirExists(dir);
+  const tmp = `${target}.tmp_${crypto.randomUUID().slice(0, 8)}`;
+  await fs.promises.writeFile(tmp, buf);
+  await fs.promises.rename(tmp, target);
+  return { ok: true, path: target };
+}
+
+function documentStoragePath({ documentId, versionId, mimeType }) {
+  const did = normalizeString(documentId);
+  const vid = normalizeString(versionId);
+  if (!did || !vid) return null;
+  const ext = fileExtFromMime(mimeType);
+  return path.join(docStoreDir, did, `${vid}.${ext}`);
+}
+
+function documentDerivedStoragePath({ documentId, versionId, suffix, ext }) {
+  const did = normalizeString(documentId);
+  const vid = normalizeString(versionId);
+  const sx = normalizeKey(suffix) || "derived";
+  const ex = normalizeKey(ext) || "bin";
+  if (!did || !vid) return null;
+  return path.join(docStoreDir, did, `${vid}_${sx}.${ex}`);
+}
+
+function isDocumentStorePathSafe(absPath) {
+  const root = path.resolve(docStoreDir);
+  const abs = path.resolve(String(absPath || ""));
+  return abs === root || abs.startsWith(`${root}${path.sep}`);
+}
+
+function mediaKindFromMime(mimeType) {
+  const mt = normalizeMimeType(mimeType);
+  if (!mt) return "other";
+  if (mt.startsWith("image/")) return "image";
+  if (mt.startsWith("video/")) return "video";
+  if (mt === "application/pdf") return "pdf";
+  if (mt.startsWith("text/")) return "text";
+  return "other";
+}
+
+async function runCommandCapture(command, args, { maxBuffer = 20_000_000 } = {}) {
+  try {
+    const result = await execFileAsync(command, args, { maxBuffer });
+    return { ok: true, stdout: result.stdout || "", stderr: result.stderr || "" };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error && error.message ? String(error.message) : String(error),
+      stdout: error && typeof error.stdout === "string" ? error.stdout : "",
+      stderr: error && typeof error.stderr === "string" ? error.stderr : "",
+    };
+  }
+}
+
+async function probeMediaFile(absPath) {
+  const p = String(absPath || "");
+  if (!p) return {};
+  const result = await runCommandCapture("ffprobe", ["-v", "quiet", "-print_format", "json", "-show_streams", "-show_format", p], { maxBuffer: 2_000_000 });
+  if (!result.ok) return {};
+  try {
+    const parsed = JSON.parse(result.stdout || "{}");
+    const streams = Array.isArray(parsed.streams) ? parsed.streams : [];
+    const video = streams.find((s) => s && s.codec_type === "video") || null;
+    const format = parsed.format && typeof parsed.format === "object" ? parsed.format : {};
+    return {
+      widthPx: video && video.width !== undefined ? Number(video.width) || null : null,
+      heightPx: video && video.height !== undefined ? Number(video.height) || null : null,
+      frameCount: video && video.nb_frames !== undefined ? Number(video.nb_frames) || null : null,
+      durationSeconds: format.duration !== undefined ? Number(format.duration) || null : null,
+    };
+  } catch {
+    return {};
+  }
+}
+
+async function runOcrOnImage(absPath) {
+  const result = await runCommandCapture("tesseract", [String(absPath || ""), "stdout", "-l", docOcrLanguages], { maxBuffer: 8_000_000 });
+  if (!result.ok) return { ok: false, error: result.error || "ocr_failed" };
+  return { ok: true, text: String(result.stdout || "").trim() };
+}
+
+async function extractPdfTextOrImage({ absPath, previewPath }) {
+  const textRes = await runCommandCapture("pdftotext", ["-layout", String(absPath || ""), "-"], { maxBuffer: 8_000_000 });
+  const plainText = textRes.ok ? String(textRes.stdout || "").trim() : "";
+  if (plainText) return { ok: true, text: plainText, pageCount: null, previewStoragePath: null };
+  if (!previewPath) return { ok: false, error: "pdf_preview_path_required" };
+  await ensureDirExists(path.dirname(previewPath));
+  const prefix = previewPath.replace(/\.png$/i, "");
+  const raster = await runCommandCapture("pdftoppm", ["-png", "-singlefile", "-f", "1", "-l", "1", String(absPath || ""), prefix], { maxBuffer: 4_000_000 });
+  if (!raster.ok) return { ok: false, error: raster.error || "pdf_rasterize_failed" };
+  const rasterPath = `${prefix}.png`;
+  const ocr = await runOcrOnImage(rasterPath);
+  if (!ocr.ok) return { ok: false, error: ocr.error || "pdf_ocr_failed" };
+  return { ok: true, text: ocr.text, pageCount: 1, previewStoragePath: rasterPath };
+}
+
+async function extractVideoPreview({ absPath, previewPath }) {
+  await ensureDirExists(path.dirname(previewPath));
+  const result = await runCommandCapture("ffmpeg", ["-y", "-i", String(absPath || ""), "-frames:v", "1", previewPath], { maxBuffer: 4_000_000 });
+  if (!result.ok) return { ok: false, error: result.error || "video_preview_failed" };
+  return { ok: true, previewStoragePath: previewPath };
+}
+
+function buildDocumentSigningPayloadText({ versionId, contentSha256, createdAt, mimeType, sizeBytes }) {
+  const vid = normalizeString(versionId);
+  const sha = normalizeString(contentSha256);
+  const ts = normalizeString(createdAt);
+  const mt = normalizeMimeType(mimeType);
+  const sz = Number(sizeBytes) || 0;
+  if (!vid || !sha || !ts || !mt || sz <= 0) return null;
+  return `ERP-DOCSIG-v1\nversionId=${vid}\ncontentSha256=${sha}\ncreatedAt=${ts}\nmimeType=${mt}\nsizeBytes=${sz}\n`;
 }
 
 function parseIsoDate(value) {
@@ -2649,8 +6195,375 @@ function blockDeepLink(block) {
   return `/?module=workshop&entity=${encodeURIComponent(block.reference.entityType)}:${encodeURIComponent(block.reference.entityId)}`;
 }
 
+function customerDeepLink(customerId) {
+  return `/?module=crm&entity=customer:${encodeURIComponent(customerId)}`;
+}
+
+function contractDeepLink(contractId) {
+  return `/?module=crm&entity=contract:${encodeURIComponent(contractId)}`;
+}
+
+function documentDeepLink(documentId) {
+  return `/?module=documents&entity=document:${encodeURIComponent(documentId)}`;
+}
+
+function workshopCaseDeepLink(caseId) {
+  return `/?module=workshop&entity=workshopCase:${encodeURIComponent(caseId)}`;
+}
+
+function trainingDeepLink(entityType, entityId) {
+  return `/?module=training&entity=${encodeURIComponent(entityType)}:${encodeURIComponent(entityId)}`;
+}
+
+function integrationSystemDeepLink(systemId) {
+  return `/?module=integrations&entity=integrationSystem:${encodeURIComponent(systemId)}`;
+}
+
 function includesLoose(haystack, needle) {
   return String(haystack).toLowerCase().includes(String(needle).toLowerCase());
+}
+
+function hasAnyPermission(auth, permissions) {
+  const perms = auth && auth.permissions instanceof Set ? auth.permissions : new Set();
+  for (const p of Array.isArray(permissions) ? permissions : []) {
+    if (perms.has(p)) return true;
+  }
+  return false;
+}
+
+function normalizeSearchModules(value) {
+  const raw = Array.isArray(value) ? value.join(",") : normalizeString(value);
+  const items = raw
+    .split(",")
+    .map((x) => normalizeKey(x))
+    .filter(Boolean);
+  if (items.length === 0 || items.includes("*") || items.includes("all")) return null;
+  return new Set(items);
+}
+
+function searchModuleRequested(requestedModules, moduleKey) {
+  return !requestedModules || requestedModules.has(moduleKey);
+}
+
+function searchRank(q, ...values) {
+  const needle = normalizeString(q).toLowerCase();
+  if (!needle) return 0;
+  let best = 0;
+  for (const value of values) {
+    const text = normalizeString(value).toLowerCase();
+    if (!text) continue;
+    if (text === needle) best = Math.max(best, 120);
+    else if (text.startsWith(needle)) best = Math.max(best, 90);
+    else if (text.includes(needle)) best = Math.max(best, 60);
+  }
+  return best;
+}
+
+async function searchGlobal({ auth, q, modules = null, limit = 20 } = {}) {
+  if (!pool) return { items: [], requestedModules: modules ? Array.from(modules) : ["all"], searchedModules: [], skippedModules: [{ module: "db", reason: "db_required" }] };
+  const query = normalizeString(q);
+  if (!query) return { items: [], requestedModules: modules ? Array.from(modules) : ["all"], searchedModules: [], skippedModules: [] };
+
+  const requestedModules = modules instanceof Set ? modules : normalizeSearchModules(modules);
+  const searchedModules = [];
+  const skippedModules = [];
+  const items = [];
+  const totalLimit = Math.max(1, Math.min(100, Number(limit) || 20));
+  const perModuleLimit = Math.max(5, Math.min(50, totalLimit));
+
+  const addItem = (item) => {
+    if (!item || !item.id || !item.type || !item.title) return;
+    items.push(item);
+  };
+  const allow = (moduleKey, permissions) => {
+    if (!searchModuleRequested(requestedModules, moduleKey)) return false;
+    if (!hasAnyPermission(auth, permissions)) {
+      skippedModules.push({ module: moduleKey, reason: "forbidden" });
+      return false;
+    }
+    searchedModules.push(moduleKey);
+    return true;
+  };
+
+  if (allow("fleet", [Permissions.WorkshopView, Permissions.WorkshopAdmin, Permissions.FleetAdmin, Permissions.ViewAudit])) {
+    const vehicles = await getVehicles();
+    for (const v of vehicles) {
+      const rank = searchRank(query, v.code, v.type, v.kind, Array.isArray(v.capabilities) ? v.capabilities.join(" ") : "");
+      if (!rank) continue;
+      addItem({
+        module: "fleet",
+        type: "vehicle",
+        id: v.id,
+        title: v.code,
+        subtitle: [v.type, v.kind].filter(Boolean).join(" | "),
+        href: vehicleDeepLink(v.id),
+        updatedAt: null,
+        score: rank,
+      });
+    }
+
+    const blocks = await getAvailabilityBlocks({ activeOnly: false });
+    for (const b of blocks) {
+      const vehicle = vehicles.find((x) => x.id === b.vehicleId) || null;
+      const rank = searchRank(query, b.reason, vehicle?.code || "", b.reference?.entityType || "");
+      if (!rank) continue;
+      addItem({
+        module: "fleet",
+        type: "availabilityBlock",
+        id: b.id,
+        title: `Sperre: ${vehicle ? vehicle.code : b.vehicleId}`,
+        subtitle: b.reason,
+        href: blockDeepLink(b),
+        updatedAt: b.updatedAt || b.startsAt || null,
+        severity: b.severity,
+        score: rank,
+      });
+    }
+  }
+
+  if (allow("customers", [Permissions.CustomerView, Permissions.CustomerManage, Permissions.FleetAdmin, Permissions.ViewAudit])) {
+    const customers = await listCustomers({ q: query, activeOnly: false, limit: perModuleLimit });
+    for (const customer of customers) {
+      addItem({
+        module: "customers",
+        type: "customer",
+        id: customer.id,
+        title: customer.name,
+        subtitle: customer.customerNo,
+        href: customerDeepLink(customer.id),
+        updatedAt: customer.updatedAt || null,
+        score: searchRank(query, customer.name, customer.customerNo),
+      });
+    }
+  }
+
+  if (allow("contracts", [Permissions.ContractView, Permissions.ContractManage, Permissions.FleetAdmin, Permissions.ViewAudit])) {
+    const rows = await pool
+      .query(
+        `
+        select c.id, c.contract_no, c.title, c.status, c.updated_at, cu.name as customer_name
+        from crm_contract c
+        join crm_customer cu on cu.id = c.customer_id
+        where c.contract_no ilike '%' || $1 || '%'
+           or coalesce(c.title, '') ilike '%' || $1 || '%'
+           or cu.name ilike '%' || $1 || '%'
+        order by c.updated_at desc
+        limit $2;
+        `,
+        [query, perModuleLimit],
+      )
+      .then((r) => r.rows)
+      .catch(() => []);
+    for (const row of rows) {
+      addItem({
+        module: "contracts",
+        type: "contract",
+        id: row.id,
+        title: row.contract_no,
+        subtitle: [row.title || null, row.customer_name || null, row.status || null].filter(Boolean).join(" | "),
+        href: contractDeepLink(row.id),
+        updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : null,
+        score: searchRank(query, row.contract_no, row.title || "", row.customer_name || ""),
+      });
+    }
+  }
+
+  if (allow("documents", [Permissions.DocumentView, Permissions.DocumentManage, Permissions.DocumentAdmin, Permissions.ViewAudit])) {
+    const docs = await searchDocuments({ auth, q: query, filters: [], limit: perModuleLimit });
+    for (const doc of docs) {
+      addItem({
+        module: "documents",
+        type: "document",
+        id: doc.id,
+        title: doc.title,
+        subtitle: doc.docType,
+        href: documentDeepLink(doc.id),
+        updatedAt: doc.updatedAt || doc.createdAt || null,
+        score: searchRank(query, doc.title, doc.docType),
+      });
+    }
+  }
+
+  if (allow("workshop", [Permissions.WorkshopView, Permissions.WorkshopAdmin, Permissions.FleetAdmin, Permissions.ViewAudit])) {
+    const rows = await pool
+      .query(
+        `
+        select c.id, c.title, c.description, c.status, c.work_state, c.opened_at, v.code as vehicle_code
+        from workshop_case c
+        left join fleet_vehicle v on v.id = c.vehicle_id
+        where c.title ilike '%' || $1 || '%'
+           or coalesce(c.description, '') ilike '%' || $1 || '%'
+           or coalesce(v.code, '') ilike '%' || $1 || '%'
+        order by c.opened_at desc
+        limit $2;
+        `,
+        [query, perModuleLimit],
+      )
+      .then((r) => r.rows)
+      .catch(() => []);
+    for (const row of rows) {
+      addItem({
+        module: "workshop",
+        type: "workshopCase",
+        id: row.id,
+        title: row.title,
+        subtitle: [row.vehicle_code || null, row.work_state || null, row.status || null].filter(Boolean).join(" | "),
+        href: workshopCaseDeepLink(row.id),
+        updatedAt: row.opened_at ? new Date(row.opened_at).toISOString() : null,
+        score: searchRank(query, row.title, row.description || "", row.vehicle_code || ""),
+      });
+    }
+  }
+
+  if (
+    allow("training", [
+      Permissions.TrainingCatalogView,
+      Permissions.TrainingCatalogAdmin,
+      Permissions.TrainingPlanView,
+      Permissions.TrainingPlanManage,
+      Permissions.TrainingCredentialView,
+      Permissions.TrainingCredentialIssue,
+      Permissions.TrainingEmployeeView,
+      Permissions.TrainingEmployeeAdmin,
+      Permissions.TrainingSelfView,
+      Permissions.FleetAdmin,
+      Permissions.ViewAudit,
+    ])
+  ) {
+    const qualificationRows = await pool
+      .query(
+        `
+        select id, code, name, category, active, created_at
+        from training_qualification
+        where code ilike '%' || $1 || '%'
+           or name ilike '%' || $1 || '%'
+           or coalesce(description, '') ilike '%' || $1 || '%'
+        order by name asc
+        limit $2;
+        `,
+        [query, perModuleLimit],
+      )
+      .then((r) => r.rows)
+      .catch(() => []);
+    for (const row of qualificationRows) {
+      addItem({
+        module: "training",
+        type: "trainingQualification",
+        id: row.id,
+        title: row.name,
+        subtitle: [row.code, row.category, row.active === true ? "active" : "inactive"].filter(Boolean).join(" | "),
+        href: trainingDeepLink("qualification", row.id),
+        updatedAt: row.created_at ? new Date(row.created_at).toISOString() : null,
+        score: searchRank(query, row.code, row.name, row.category || ""),
+      });
+    }
+
+    if (hasAnyPermission(auth, [Permissions.TrainingPlanView, Permissions.TrainingPlanManage, Permissions.TrainingCatalogView, Permissions.TrainingCatalogAdmin, Permissions.FleetAdmin, Permissions.ViewAudit])) {
+      const courseRows = await pool
+        .query(
+          `
+          select id, code, name, delivery_mode, created_at
+          from training_course
+          where code ilike '%' || $1 || '%'
+             or name ilike '%' || $1 || '%'
+             or coalesce(description, '') ilike '%' || $1 || '%'
+          order by name asc
+          limit $2;
+          `,
+          [query, perModuleLimit],
+        )
+        .then((r) => r.rows)
+        .catch(() => []);
+      for (const row of courseRows) {
+        addItem({
+          module: "training",
+          type: "trainingCourse",
+          id: row.id,
+          title: row.name,
+          subtitle: [row.code, row.delivery_mode || null].filter(Boolean).join(" | "),
+          href: trainingDeepLink("course", row.id),
+          updatedAt: row.created_at ? new Date(row.created_at).toISOString() : null,
+          score: searchRank(query, row.code, row.name, row.delivery_mode || ""),
+        });
+      }
+    }
+
+    if (hasAnyPermission(auth, [Permissions.TrainingPlanView, Permissions.TrainingPlanManage, Permissions.FleetAdmin, Permissions.ViewAudit])) {
+      const sessionRows = await pool
+        .query(
+          `
+          select s.id, s.starts_at, s.location, s.status, c.code as course_code, c.name as course_name
+          from training_session s
+          join training_course c on c.id = s.course_id
+          where c.code ilike '%' || $1 || '%'
+             or c.name ilike '%' || $1 || '%'
+             or coalesce(s.location, '') ilike '%' || $1 || '%'
+          order by s.starts_at desc
+          limit $2;
+          `,
+          [query, perModuleLimit],
+        )
+        .then((r) => r.rows)
+        .catch(() => []);
+      for (const row of sessionRows) {
+        addItem({
+          module: "training",
+          type: "trainingSession",
+          id: row.id,
+          title: `${row.course_name} (${row.course_code})`,
+          subtitle: [row.location || null, row.status || null].filter(Boolean).join(" | "),
+          href: trainingDeepLink("session", row.id),
+          updatedAt: row.starts_at ? new Date(row.starts_at).toISOString() : null,
+          score: searchRank(query, row.course_code, row.course_name, row.location || ""),
+        });
+      }
+    }
+  }
+
+  if (allow("integrations", [Permissions.FleetAdmin, Permissions.AuthAdmin, Permissions.ViewAudit])) {
+    const rows = await pool
+      .query(
+        `
+        select id, kind, name, status, updated_at
+        from integration_system
+        where name ilike '%' || $1 || '%'
+           or kind ilike '%' || $1 || '%'
+        order by updated_at desc
+        limit $2;
+        `,
+        [query, perModuleLimit],
+      )
+      .then((r) => r.rows)
+      .catch(() => []);
+    for (const row of rows) {
+      addItem({
+        module: "integrations",
+        type: "integrationSystem",
+        id: row.id,
+        title: row.name,
+        subtitle: [row.kind, row.status].filter(Boolean).join(" | "),
+        href: integrationSystemDeepLink(row.id),
+        updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : null,
+        score: searchRank(query, row.name, row.kind, row.status || ""),
+      });
+    }
+  }
+
+  items.sort((a, b) => {
+    const scoreDiff = (Number(b.score) || 0) - (Number(a.score) || 0);
+    if (scoreDiff) return scoreDiff;
+    const timeA = a.updatedAt ? new Date(a.updatedAt).getTime() : 0;
+    const timeB = b.updatedAt ? new Date(b.updatedAt).getTime() : 0;
+    if (timeB !== timeA) return timeB - timeA;
+    return String(a.title).localeCompare(String(b.title));
+  });
+
+  return {
+    items: items.slice(0, totalLimit),
+    requestedModules: requestedModules ? Array.from(requestedModules) : ["all"],
+    searchedModules: Array.from(new Set(searchedModules)),
+    skippedModules,
+  };
 }
 
 function isBlockActive(block, at = new Date()) {
@@ -2992,6 +6905,18 @@ async function createApprovalRequest({ requestType, requestSubtype, requestedBy,
         dueAt: dueAt.toISOString(),
       },
     });
+    await createNotificationFromRuleKey({
+      ruleKey: "approval_requested_default",
+      aggregateType: "approval_request",
+      aggregateId: id,
+      title: `Freigabe angefordert: ${t}`,
+      message: `${s || t} wartet auf Bearbeitung. SLA bis ${dueAt.toISOString()}.`,
+      payload: { requestType: t, requestSubtype: s || null, dueAt: dueAt.toISOString(), reason: reason || null },
+      audience: { permissions: [firstStep.requiredPermission] },
+      correlationId: id,
+      createdBy: u,
+      slaDueAt: dueAt.toISOString(),
+    }).catch(() => null);
   }
   publishEvent("approval", "APPROVAL_REQUESTED", { requestId: id, requestType: t, requestSubtype: s || null, dueAt: dueAt.toISOString() });
 
@@ -3078,6 +7003,7 @@ async function decideApprovalRequest({ requestId, decision, auth, reason }) {
       payload: { stepNo: Number(step.step_no), reason: why },
     });
     publishEvent("approval", "APPROVAL_REJECTED", { requestId: rid, stepNo: Number(step.step_no), reason: why });
+    await resolveNotificationsByAggregate({ aggregateType: "approval_request", aggregateId: rid, actor: u }).catch(() => null);
 
     return { ok: true, item: await getApprovalRequestById(rid) };
   }
@@ -3123,6 +7049,19 @@ async function decideApprovalRequest({ requestId, decision, auth, reason }) {
       payload: { stepNo: Number(step.step_no), nextStepNo: Number(next.step_no), dueAt: dueAt.toISOString() },
     });
     publishEvent("approval", "APPROVAL_STEP_APPROVED", { requestId: rid, stepNo: Number(step.step_no), nextStepNo: Number(next.step_no), dueAt: dueAt.toISOString() });
+    await resolveNotificationsByAggregate({ aggregateType: "approval_request", aggregateId: rid, actor: u }).catch(() => null);
+    await createNotificationFromRuleKey({
+      ruleKey: "approval_requested_default",
+      aggregateType: "approval_request",
+      aggregateId: rid,
+      title: `Nächste Freigabestufe: ${reqRow.request_type}`,
+      message: `${reqRow.request_subtype || reqRow.request_type} benötigt die nächste Freigabe. SLA bis ${dueAt.toISOString()}.`,
+      payload: { requestType: reqRow.request_type, requestSubtype: reqRow.request_subtype || null, dueAt: dueAt.toISOString(), nextStepNo: Number(next.step_no) },
+      audience: { permissions: [next.required_permission] },
+      correlationId: rid,
+      createdBy: u,
+      slaDueAt: dueAt.toISOString(),
+    }).catch(() => null);
 
     return { ok: true, item: await getApprovalRequestById(rid) };
   }
@@ -3142,6 +7081,7 @@ async function decideApprovalRequest({ requestId, decision, auth, reason }) {
 
   const applyRes = await applyApprovalRequest({ requestId: rid, appliedBy: u });
   if (!applyRes.ok) return applyRes;
+  await resolveNotificationsByAggregate({ aggregateType: "approval_request", aggregateId: rid, actor: u }).catch(() => null);
   return { ok: true, item: await getApprovalRequestById(rid), applied: applyRes.applied };
 }
 
@@ -3451,6 +7391,18 @@ async function tickApprovalEscalations() {
       createdBy: "system",
       payload: { template: "approval_escalated", toPermission: escPerm, requestId: rid, stepNo: Number(step.step_no), dueAt: nextDue.toISOString() },
     });
+    await createNotificationFromRuleKey({
+      ruleKey: "approval_escalated_default",
+      aggregateType: "approval_request",
+      aggregateId: rid,
+      title: "Freigabe eskaliert",
+      message: `Freigabe ${rid} wurde auf ${escPerm} eskaliert. Neue Fälligkeit: ${nextDue.toISOString()}.`,
+      payload: { stepNo: Number(step.step_no), fromPermission: oldPerm, toPermission: escPerm, dueAt: nextDue.toISOString() },
+      audience: { permissions: [escPerm] },
+      correlationId: rid,
+      createdBy: "system",
+      slaDueAt: nextDue.toISOString(),
+    }).catch(() => null);
     publishEvent("approval", "APPROVAL_ESCALATED", { requestId: rid, stepNo: Number(step.step_no), fromPermission: oldPerm, toPermission: escPerm, dueAt: nextDue.toISOString() });
     escalated += 1;
   }
@@ -3492,6 +7444,43 @@ async function publishErpEvent(args) {
         JSON.stringify(envelope.headers),
       ],
     );
+    observeErpEventPublished({ eventType: envelope.eventType });
+    return envelope.id;
+  } catch {
+    return null;
+  }
+}
+
+async function publishErpEventTx(client, args) {
+  if (!client) return null;
+  const envelope = buildErpEventEnvelope(args || {});
+  if (!envelope) return null;
+  try {
+    await client.query(
+      `
+      insert into erp_event
+        (id, event_type, aggregate_type, aggregate_id, occurred_at, created_by, correlation_id, payload, schema_version, source_module, causation_id, trace_id, partition_key, headers)
+      values
+        ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12,$13,$14::jsonb);
+      `,
+      [
+        envelope.id,
+        envelope.eventType,
+        envelope.aggregateType,
+        envelope.aggregateId,
+        envelope.occurredAt,
+        envelope.createdBy,
+        envelope.correlationId,
+        JSON.stringify(envelope.payload),
+        envelope.schemaVersion,
+        envelope.sourceModule,
+        envelope.causationId,
+        envelope.traceId,
+        envelope.partitionKey,
+        JSON.stringify(envelope.headers),
+      ],
+    );
+    observeErpEventPublished({ eventType: envelope.eventType });
     return envelope.id;
   } catch {
     return null;
@@ -3703,6 +7692,324 @@ async function consumeErpEvents({ consumer, afterId = null, limit = 200, types =
     items,
     nextAfterId: items.length ? items[items.length - 1].id : startAfterId,
   };
+}
+
+function normalizeIntegrationKind(value) {
+  const k = normalizeKey(value);
+  if (!k) return null;
+  if (k === "telematik") return "telematics";
+  return k;
+}
+
+function normalizeIntegrationStatus(value) {
+  const s = normalizeKey(value);
+  if (!s) return null;
+  if (s === "enabled") return "active";
+  if (s === "disabled") return "disabled";
+  return s;
+}
+
+function integrationConsumerId(systemId) {
+  const id = normalizeString(systemId);
+  return id ? `integration:${id}` : null;
+}
+
+async function listIntegrationSystems({ kind = null, status = null, limit = 200 } = {}) {
+  if (!pool) return [];
+  const k = kind ? normalizeIntegrationKind(kind) : null;
+  const st = status ? normalizeIntegrationStatus(status) : null;
+  const n = Math.max(1, Math.min(1000, Number(limit) || 200));
+  const rows = await pool
+    .query(
+      `
+      select id, kind, name, status, config, created_by, created_at, updated_at
+      from integration_system
+      where ($1::text is null or kind = $1)
+        and ($2::text is null or status = $2)
+      order by created_at desc
+      limit $3;
+      `,
+      [k, st, n],
+    )
+    .then((r) => r.rows)
+    .catch(() => []);
+  return rows.map((r) => ({
+    id: r.id,
+    kind: r.kind,
+    name: r.name,
+    status: r.status,
+    config: r.config || {},
+    createdBy: r.created_by,
+    createdAt: new Date(r.created_at).toISOString(),
+    updatedAt: new Date(r.updated_at).toISOString(),
+  }));
+}
+
+async function getIntegrationSystemById(systemId) {
+  if (!pool) return null;
+  const id = normalizeString(systemId);
+  if (!id) return null;
+  const row = await pool
+    .query(
+      `
+      select id, kind, name, status, config, created_by, created_at, updated_at
+      from integration_system
+      where id = $1
+      limit 1;
+      `,
+      [id],
+    )
+    .then((r) => r.rows[0] || null)
+    .catch(() => null);
+  if (!row) return null;
+  return {
+    id: row.id,
+    kind: row.kind,
+    name: row.name,
+    status: row.status,
+    config: row.config || {},
+    createdBy: row.created_by,
+    createdAt: new Date(row.created_at).toISOString(),
+    updatedAt: new Date(row.updated_at).toISOString(),
+  };
+}
+
+async function createIntegrationSystem({ kind, name, status = "active", config = {}, createdBy } = {}) {
+  if (!pool) return { ok: false, error: "db_required" };
+  const k = normalizeIntegrationKind(kind);
+  const n = normalizeString(name);
+  const st = normalizeIntegrationStatus(status) || "active";
+  if (!k) return { ok: false, error: "kind_required" };
+  if (!n) return { ok: false, error: "name_required" };
+  if (!["active", "disabled"].includes(st)) return { ok: false, error: "status_invalid" };
+  const id = `isys_${crypto.randomUUID().slice(0, 18)}`;
+  await pool.query(
+    `
+    insert into integration_system (id, kind, name, status, config, created_by, created_at, updated_at)
+    values ($1,$2,$3,$4,$5::jsonb,$6, now(), now());
+    `,
+    [id, k, n, st, JSON.stringify(config && typeof config === "object" ? config : {}), createdBy || "system"],
+  );
+  return { ok: true, id };
+}
+
+async function updateIntegrationSystem({ id, name = null, status = null, config = null } = {}) {
+  if (!pool) return { ok: false, error: "db_required" };
+  const sid = normalizeString(id);
+  if (!sid) return { ok: false, error: "id_required" };
+  const n = name === null || name === undefined ? null : normalizeString(name);
+  const st = status === null || status === undefined ? null : normalizeIntegrationStatus(status);
+  if (st !== null && !["active", "disabled"].includes(st)) return { ok: false, error: "status_invalid" };
+  const cfg = config === null || config === undefined ? null : config && typeof config === "object" ? config : {};
+  const row = await pool
+    .query(
+      `
+      update integration_system
+      set name = coalesce($2, name),
+          status = coalesce($3, status),
+          config = coalesce($4::jsonb, config),
+          updated_at = now()
+      where id = $1
+      returning id;
+      `,
+      [sid, n, st, cfg === null ? null : JSON.stringify(cfg)],
+    )
+    .then((r) => r.rows[0] || null)
+    .catch(() => null);
+  if (!row) return { ok: false, error: "not_found" };
+  return { ok: true, id: row.id };
+}
+
+async function listIntegrationSubscriptions({ systemId = null, activeOnly = false, limit = 500 } = {}) {
+  if (!pool) return [];
+  const sid = systemId ? normalizeString(systemId) : null;
+  const n = Math.max(1, Math.min(2000, Number(limit) || 500));
+  const rows = await pool
+    .query(
+      `
+      select id, system_id, active, event_types, aggregate_type, created_by, created_at, updated_at
+      from integration_subscription
+      where ($1::text is null or system_id = $1)
+        and ($2::boolean = false or active = true)
+      order by updated_at desc, id desc
+      limit $3;
+      `,
+      [sid, Boolean(activeOnly), n],
+    )
+    .then((r) => r.rows)
+    .catch(() => []);
+  return rows.map((r) => ({
+    id: r.id,
+    systemId: r.system_id,
+    active: Boolean(r.active),
+    eventTypes: Array.isArray(r.event_types) ? r.event_types : [],
+    aggregateType: r.aggregate_type || null,
+    createdBy: r.created_by,
+    createdAt: new Date(r.created_at).toISOString(),
+    updatedAt: new Date(r.updated_at).toISOString(),
+  }));
+}
+
+async function upsertIntegrationSubscription({ id = null, systemId, active = true, eventTypes, aggregateType = null, createdBy } = {}) {
+  if (!pool) return { ok: false, error: "db_required" };
+  const sid = normalizeString(systemId);
+  if (!sid) return { ok: false, error: "systemId_required" };
+  const evTypes = Array.isArray(eventTypes) ? eventTypes.map((t) => normalizeString(t)).filter(Boolean) : [];
+  if (evTypes.length === 0) return { ok: false, error: "eventTypes_required" };
+  const agg = normalizeString(aggregateType) || null;
+  const subId = normalizeString(id) || `isub_${crypto.randomUUID().slice(0, 18)}`;
+  const row = await pool
+    .query(
+      `
+      insert into integration_subscription (id, system_id, active, event_types, aggregate_type, created_by, created_at, updated_at)
+      values ($1,$2,$3,$4::text[],$5,$6, now(), now())
+      on conflict (id) do update
+        set system_id = excluded.system_id,
+            active = excluded.active,
+            event_types = excluded.event_types,
+            aggregate_type = excluded.aggregate_type,
+            updated_at = now()
+      returning id;
+      `,
+      [subId, sid, Boolean(active), evTypes, agg, createdBy || "system"],
+    )
+    .then((r) => r.rows[0] || null)
+    .catch(() => null);
+  if (!row) return { ok: false, error: "upsert_failed" };
+  return { ok: true, id: row.id };
+}
+
+async function deliverIntegrationEventHttp({ system, event, jobId, workerId }) {
+  const cfg = system && system.config && typeof system.config === "object" ? system.config : {};
+  const endpointUrl = normalizeString(cfg.endpointUrl || cfg.url || "");
+  if (!endpointUrl) {
+    return { ok: true, status: "ignored", errorCode: "not_configured", errorMessage: "endpointUrl_required", meta: {} };
+  }
+
+  const headers = cfg.headers && typeof cfg.headers === "object" ? cfg.headers : {};
+  const authBearer = normalizeString(cfg.authBearer || cfg.token || "");
+  const timeoutMs = Math.max(1000, Math.min(60_000, Number(cfg.timeoutMs) || 15_000));
+  const body = {
+    system: { id: system.id, kind: system.kind, name: system.name },
+    event,
+  };
+
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(endpointUrl, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-erp-event-id": event.id,
+        "x-erp-event-type": event.eventType,
+        ...(authBearer ? { authorization: `Bearer ${authBearer}` } : {}),
+        ...(headers || {}),
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    const text = await res.text().catch(() => "");
+    if (!res.ok) {
+      return { ok: false, errorCode: "delivery_failed", errorMessage: `http_${res.status}${text ? `:${String(text).slice(0, 500)}` : ""}`, meta: { endpointUrl, status: res.status, jobId, workerId } };
+    }
+    return { ok: true, status: "delivered", errorCode: null, errorMessage: null, meta: { endpointUrl, status: res.status } };
+  } catch (e) {
+    const msg = e && e.name === "AbortError" ? "timeout" : String(e && e.message ? e.message : e);
+    return { ok: false, errorCode: "delivery_failed", errorMessage: msg, meta: { endpointUrl, jobId, workerId } };
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+async function deliverIntegrationEvent({ system, event, jobId, workerId }) {
+  const kind = normalizeIntegrationKind(system?.kind) || "custom";
+  if (system?.status !== "active") return { ok: true, status: "ignored", errorCode: "disabled", errorMessage: "system_disabled", meta: {} };
+  if (kind === "datev" || kind === "dms" || kind === "telematics" || kind === "email" || kind === "sms" || kind === "portal" || kind === "custom") {
+    return await deliverIntegrationEventHttp({ system, event, jobId, workerId });
+  }
+  return { ok: true, status: "ignored", errorCode: "unsupported_kind", errorMessage: "unsupported_kind", meta: { kind } };
+}
+
+async function runIntegrationsDispatchJob({ job, workerId }) {
+  if (!pool) throw new Error("db_required");
+  const jobId = job.id;
+  const systemId = normalizeString(job.params && job.params.systemId) || null;
+  const limitRaw = job.params && job.params.limit !== undefined ? Number(job.params.limit) : null;
+  const limit = Math.max(1, Math.min(500, Number.isFinite(limitRaw) ? limitRaw : 100));
+  let list = [];
+  if (systemId) {
+    const s = await getIntegrationSystemById(systemId);
+    if (!s) throw new Error("system_not_found");
+    list = [s];
+  } else {
+    list = await listIntegrationSystems({ status: "active", limit: 500 });
+  }
+
+  let delivered = 0;
+  let ignored = 0;
+  let processedSystems = 0;
+
+  for (const system of list) {
+    processedSystems += 1;
+    const subs = await listIntegrationSubscriptions({ systemId: system.id, activeOnly: true, limit: 2000 });
+    if (!subs || subs.length === 0) continue;
+    const typeSet = new Set();
+    let anyAll = false;
+    let aggType = null;
+    let aggCount = 0;
+    for (const s of subs) {
+      if (s.aggregateType) {
+        aggType = s.aggregateType;
+        aggCount += 1;
+      }
+      for (const t of Array.isArray(s.eventTypes) ? s.eventTypes : []) {
+        if (t === "*") anyAll = true;
+        else typeSet.add(t);
+      }
+    }
+    const types = anyAll ? null : Array.from(typeSet);
+    if (!anyAll && typeSet.size === 0) continue;
+    const aggregateType = aggCount === 1 ? aggType : null;
+
+    const consumer = integrationConsumerId(system.id);
+    if (!consumer) continue;
+    const c = await consumeErpEvents({ consumer, limit, types, aggregateType, aggregateId: null });
+    if (!c.ok) throw new Error(c.error || "consume_failed");
+
+    for (const ev of c.items || []) {
+      await appendJobLog({ jobId, level: "info", message: "integration_deliver_attempt", meta: { systemId: system.id, kind: system.kind, eventId: ev.id, eventType: ev.eventType } });
+      const r = await deliverIntegrationEvent({ system, event: ev, jobId, workerId });
+
+      if (r.ok && (r.status === "delivered" || r.status === "ignored")) {
+        await recordErpConsumerDelivery({
+          consumer,
+          eventId: ev.id,
+          status: r.status,
+          errorCode: r.errorCode || null,
+          errorMessage: r.errorMessage || null,
+          meta: r.meta && typeof r.meta === "object" ? r.meta : {},
+        }).catch(() => null);
+        await setErpConsumerOffset({ consumer, lastEventId: ev.id }).catch(() => null);
+        if (r.status === "delivered") delivered += 1;
+        else ignored += 1;
+        continue;
+      }
+
+      await recordErpConsumerDelivery({
+        consumer,
+        eventId: ev.id,
+        status: "failed",
+        errorCode: r.errorCode || "delivery_failed",
+        errorMessage: r.errorMessage || "delivery_failed",
+        meta: r.meta && typeof r.meta === "object" ? r.meta : {},
+      }).catch(() => null);
+      throw new Error(r.errorMessage || r.errorCode || "delivery_failed");
+    }
+  }
+
+  await appendJobLog({ jobId, level: "info", message: "integrations_dispatch_done", meta: { processedSystems, delivered, ignored, limit } });
+  return { processedSystems, delivered, ignored };
 }
 
 async function getActiveOverridesForUser(username, at = new Date()) {
@@ -4387,6 +8694,391 @@ async function updateWasteOrderStatus({ orderId, toStatus, reason, username, met
   return { ok: true, order: updated };
 }
 
+function normalizeBusinessRuleDomain(value) {
+  const raw = normalizeString(value).toLowerCase();
+  const norm = raw.replace(/[^a-z0-9_:-]+/g, "_").replace(/^_+|_+$/g, "");
+  return norm || null;
+}
+
+function getBusinessRulePathValue(source, path) {
+  const root = source && typeof source === "object" ? source : {};
+  const p = normalizeString(path);
+  if (!p) return undefined;
+  return p.split(".").reduce((acc, key) => (acc && typeof acc === "object" ? acc[key] : undefined), root);
+}
+
+function setBusinessRulePathValue(target, path, value) {
+  const root = target && typeof target === "object" ? target : null;
+  const p = normalizeString(path);
+  if (!root || !p) return false;
+  const parts = p.split(".").filter(Boolean);
+  if (!parts.length) return false;
+  let cursor = root;
+  for (let i = 0; i < parts.length - 1; i += 1) {
+    const key = parts[i];
+    if (!cursor[key] || typeof cursor[key] !== "object") cursor[key] = {};
+    cursor = cursor[key];
+  }
+  cursor[parts[parts.length - 1]] = value;
+  return true;
+}
+
+function normalizeBusinessRuleActions(value) {
+  return Array.isArray(value) ? value.filter((x) => x && typeof x === "object") : [];
+}
+
+function normalizeBusinessRuleConditionTree(value) {
+  return value && typeof value === "object" ? value : {};
+}
+
+function businessRuleValuesEqual(a, b) {
+  if (typeof a === "string" || typeof b === "string") return normalizeString(a).toLowerCase() === normalizeString(b).toLowerCase();
+  return a === b;
+}
+
+function evaluateBusinessRuleLeaf(condition, context) {
+  const c = condition && typeof condition === "object" ? condition : {};
+  const op = normalizeKey(c.op || "eq") || "eq";
+  const actual = getBusinessRulePathValue(context, c.path);
+  const value = c.value;
+  const values = Array.isArray(c.values) ? c.values : [];
+
+  if (op === "exists") return actual !== undefined && actual !== null && normalizeString(actual) !== "";
+  if (op === "not_exists") return actual === undefined || actual === null || normalizeString(actual) === "";
+  if (op === "eq") return businessRuleValuesEqual(actual, value);
+  if (op === "ne") return !businessRuleValuesEqual(actual, value);
+  if (op === "in") return values.some((item) => businessRuleValuesEqual(actual, item));
+  if (op === "not_in") return !values.some((item) => businessRuleValuesEqual(actual, item));
+  if (op === "gt") return Number(actual) > Number(value);
+  if (op === "gte") return Number(actual) >= Number(value);
+  if (op === "lt") return Number(actual) < Number(value);
+  if (op === "lte") return Number(actual) <= Number(value);
+  if (op === "between") return Number(actual) >= Number(c.min) && Number(actual) <= Number(c.max);
+  if (op === "contains") {
+    if (Array.isArray(actual)) return actual.some((item) => businessRuleValuesEqual(item, value));
+    return normalizeString(actual).toLowerCase().includes(normalizeString(value).toLowerCase());
+  }
+  if (op === "starts_with") return normalizeString(actual).toLowerCase().startsWith(normalizeString(value).toLowerCase());
+  if (op === "ends_with") return normalizeString(actual).toLowerCase().endsWith(normalizeString(value).toLowerCase());
+  if (op === "regex") {
+    try {
+      return new RegExp(normalizeString(value), c.flags || "").test(normalizeString(actual));
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
+
+function evaluateBusinessRuleConditionTree(condition, context) {
+  const c = condition && typeof condition === "object" ? condition : {};
+  if (Array.isArray(c.all)) return c.all.every((item) => evaluateBusinessRuleConditionTree(item, context));
+  if (Array.isArray(c.any)) return c.any.some((item) => evaluateBusinessRuleConditionTree(item, context));
+  if (c.not) return !evaluateBusinessRuleConditionTree(c.not, context);
+  if (!normalizeString(c.path) && !normalizeString(c.op)) return true;
+  return evaluateBusinessRuleLeaf(c, context);
+}
+
+function resolveBusinessRuleActionValue(action, context, fallback = null) {
+  const a = action && typeof action === "object" ? action : {};
+  if (a.valuePath) {
+    const v = getBusinessRulePathValue(context, a.valuePath);
+    return v === undefined ? fallback : v;
+  }
+  if (Object.prototype.hasOwnProperty.call(a, "value")) return a.value;
+  return fallback;
+}
+
+async function listBusinessRules({ domain = null, activeOnly = false, limit = 200 } = {}) {
+  if (!pool) return [];
+  const d = normalizeBusinessRuleDomain(domain);
+  const n = Math.max(1, Math.min(2000, Number(limit) || 200));
+  const rows = await pool
+    .query(
+      `
+      select
+        id, rule_key, name, domain, active, priority, stop_on_match, valid_from, valid_to,
+        conditions, actions, tags, meta, created_by, updated_by, created_at, updated_at
+      from business_rule
+      where ($1::text is null or domain = $1)
+        and ($2::boolean = false or active = true)
+      order by priority desc, updated_at desc, id desc
+      limit $3;
+      `,
+      [d, activeOnly === true, n],
+    )
+    .then((r) => r.rows)
+    .catch(() => []);
+  return rows.map((row) => ({
+    id: row.id,
+    ruleKey: row.rule_key,
+    name: row.name,
+    domain: row.domain,
+    active: Boolean(row.active),
+    priority: Number(row.priority) || 0,
+    stopOnMatch: Boolean(row.stop_on_match),
+    validFrom: row.valid_from ? String(row.valid_from) : null,
+    validTo: row.valid_to ? String(row.valid_to) : null,
+    conditions: row.conditions || {},
+    actions: Array.isArray(row.actions) ? row.actions : [],
+    tags: Array.isArray(row.tags) ? row.tags : [],
+    meta: row.meta || {},
+    createdBy: row.created_by,
+    updatedBy: row.updated_by,
+    createdAt: new Date(row.created_at).toISOString(),
+    updatedAt: new Date(row.updated_at).toISOString(),
+  }));
+}
+
+async function upsertBusinessRule({ id = null, ruleKey, name, domain, active = true, priority = 100, stopOnMatch = false, validFrom = null, validTo = null, conditions = {}, actions = [], tags = [], meta = {}, username }) {
+  if (!pool) return { ok: false, error: "db_required" };
+  const rk = normalizeString(ruleKey);
+  const nm = normalizeString(name);
+  const dm = normalizeBusinessRuleDomain(domain);
+  const user = normalizeString(username) || "system";
+  if (!rk) return { ok: false, error: "ruleKey_required" };
+  if (!nm) return { ok: false, error: "name_required" };
+  if (!dm) return { ok: false, error: "domain_required" };
+  const vf = validFrom ? parseYmd(validFrom) : null;
+  const vt = validTo ? parseYmd(validTo) : null;
+  if (validFrom && !vf) return { ok: false, error: "validFrom_invalid" };
+  if (validTo && !vt) return { ok: false, error: "validTo_invalid" };
+  if (vf && vt && vt < vf) return { ok: false, error: "valid_range_invalid" };
+  const rid = normalizeString(id) || `br_${crypto.randomUUID().slice(0, 18)}`;
+  await pool.query(
+    `
+    insert into business_rule
+      (id, rule_key, name, domain, active, priority, stop_on_match, valid_from, valid_to, conditions, actions, tags, meta, created_by, updated_by, created_at, updated_at)
+    values
+      ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11::jsonb,$12::text[],$13::jsonb,$14,$15, now(), now())
+    on conflict (rule_key) do update
+      set name = excluded.name,
+          domain = excluded.domain,
+          active = excluded.active,
+          priority = excluded.priority,
+          stop_on_match = excluded.stop_on_match,
+          valid_from = excluded.valid_from,
+          valid_to = excluded.valid_to,
+          conditions = excluded.conditions,
+          actions = excluded.actions,
+          tags = excluded.tags,
+          meta = excluded.meta,
+          updated_by = excluded.updated_by,
+          updated_at = excluded.updated_at;
+    `,
+    [
+      rid,
+      rk,
+      nm,
+      dm,
+      active === true,
+      Math.max(0, Math.floor(Number(priority) || 0)),
+      stopOnMatch === true,
+      vf,
+      vt,
+      JSON.stringify(normalizeBusinessRuleConditionTree(conditions)),
+      JSON.stringify(normalizeBusinessRuleActions(actions)),
+      Array.isArray(tags) ? tags.map((x) => normalizeString(x)).filter(Boolean) : [],
+      JSON.stringify(meta && typeof meta === "object" ? meta : {}),
+      user,
+      user,
+    ],
+  );
+  return { ok: true, id: rid };
+}
+
+async function getMunicipalityByIdOrCode(value) {
+  if (!pool) return null;
+  const v = normalizeString(value);
+  if (!v) return null;
+  const row = await pool
+    .query(
+      `
+      select id, code, name, state, rules, active, created_at, updated_at
+      from waste_municipality
+      where id = $1 or code = $1
+      limit 1;
+      `,
+      [v],
+    )
+    .then((r) => r.rows[0] || null)
+    .catch(() => null);
+  if (!row) return null;
+  return {
+    id: row.id,
+    code: row.code,
+    name: row.name,
+    state: row.state || null,
+    rules: row.rules || {},
+    active: row.active === true,
+    createdAt: row.created_at ? new Date(row.created_at).toISOString() : null,
+    updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : null,
+  };
+}
+
+async function evaluateBusinessRuleDomains({ domains, context, atDate = null } = {}) {
+  const domainList = Array.from(new Set((Array.isArray(domains) ? domains : [domains]).map((x) => normalizeBusinessRuleDomain(x)).filter(Boolean)));
+  const effectiveDate = atDate ? parseYmd(atDate) : dateToYmd(new Date());
+  const matches = [];
+  for (const domain of domainList) {
+    const rules = await listBusinessRules({ domain, activeOnly: true, limit: 500 });
+    for (const rule of rules) {
+      if (rule.validFrom && effectiveDate && rule.validFrom > effectiveDate) continue;
+      if (rule.validTo && effectiveDate && rule.validTo < effectiveDate) continue;
+      const matched = evaluateBusinessRuleConditionTree(rule.conditions || {}, context || {});
+      if (!matched) continue;
+      matches.push({
+        id: rule.id,
+        ruleKey: rule.ruleKey,
+        name: rule.name,
+        domain: rule.domain,
+        priority: rule.priority,
+        stopOnMatch: rule.stopOnMatch,
+        actions: normalizeBusinessRuleActions(rule.actions),
+        tags: rule.tags || [],
+        meta: rule.meta || {},
+      });
+      if (rule.stopOnMatch) return { ok: true, domains: domainList, matches };
+    }
+  }
+  return { ok: true, domains: domainList, matches };
+}
+
+function buildBusinessRuleHit(match, actionType, extra = {}) {
+  return {
+    rule: {
+      type: `business_rule_${normalizeKey(actionType) || "match"}`,
+      id: match.id,
+      ruleKey: match.ruleKey,
+      domain: match.domain,
+    },
+    ...extra,
+  };
+}
+
+function applyBusinessRuleUnitPriceAdjustment({ unitPriceCents, mode, value }) {
+  const base = Math.max(0, Math.round(Number(unitPriceCents) || 0));
+  const amount = Number(value) || 0;
+  if (mode === "replace") return Math.max(0, Math.round(amount));
+  if (mode === "discount_cents") return Math.max(0, base - Math.round(amount));
+  if (mode === "discount_pct") return Math.max(0, Math.round(base * (1 - amount / 100)));
+  if (mode === "markup_cents") return Math.max(0, base + Math.round(amount));
+  if (mode === "markup_pct") return Math.max(0, Math.round(base * (1 + amount / 100)));
+  if (mode === "multiply") return Math.max(0, Math.round(base * amount));
+  return base;
+}
+
+function businessRuleActionTargetsLine(action, line) {
+  const target = action && action.target && typeof action.target === "object" ? action.target : {};
+  if (target.itemType && normalizeString(target.itemType) !== normalizeString(line.itemType)) return false;
+  if (target.refCode && normalizeString(target.refCode) !== normalizeString(line.refCode)) return false;
+  return true;
+}
+
+async function applyWasteOrderBusinessRules({ draft, customer = null, contract = null, municipality = null, container = null, atDate = null } = {}) {
+  const workingDraft = draft && typeof draft === "object" ? JSON.parse(JSON.stringify(draft)) : {};
+  const evaluation = await evaluateBusinessRuleDomains({
+    domains: ["waste_order", "municipal_policy", "contract_policy"],
+    context: { order: workingDraft, customer, contract, municipality, container },
+    atDate,
+  });
+  const hits = [];
+  for (const match of evaluation.matches || []) {
+    for (const action of match.actions || []) {
+      const actionType = normalizeKey(action.type);
+      if (actionType === "deny") {
+        return {
+          ok: false,
+          error: normalizeString(action.errorCode) || "business_rule_denied",
+          message: normalizeString(action.message) || null,
+          hits: [...hits, buildBusinessRuleHit(match, actionType)],
+        };
+      }
+      if (actionType === "set_field") {
+        const rawPath = normalizeString(action.path);
+        const draftPath = rawPath.startsWith("order.") ? rawPath.slice("order.".length) : rawPath;
+        if (draftPath) {
+          setBusinessRulePathValue(workingDraft, draftPath, resolveBusinessRuleActionValue(action, { order: workingDraft, customer, contract, municipality, container }, null));
+          hits.push(buildBusinessRuleHit(match, actionType, { path: draftPath }));
+        }
+      }
+    }
+  }
+  return { ok: true, draft: workingDraft, hits };
+}
+
+async function applyPricingAggregateBusinessRules({ context, atDate = null } = {}) {
+  const evaluation = await evaluateBusinessRuleDomains({
+    domains: ["pricing", "municipal_pricing", "contract_pricing"],
+    context,
+    atDate,
+  });
+  const extraLines = [];
+  const hits = [];
+  for (const match of evaluation.matches || []) {
+    for (const action of match.actions || []) {
+      const actionType = normalizeKey(action.type);
+      if (actionType === "deny") return { ok: false, error: normalizeString(action.errorCode) || "business_rule_denied", message: normalizeString(action.message) || null, hits };
+      if (actionType === "add_fee_line") {
+        const unit = normalizeString(action.unit) || "order";
+        const qtyRaw = action.qtyPath ? getBusinessRulePathValue(context, action.qtyPath) : Object.prototype.hasOwnProperty.call(action, "qty") ? action.qty : unit === "t" ? getBusinessRulePathValue(context, "qty.tons") : 1;
+        const qty = Number(qtyRaw);
+        const amountCents = Number(resolveBusinessRuleActionValue(action, context, action.amountCents));
+        if (!Number.isFinite(qty) || qty <= 0 || !Number.isFinite(amountCents) || amountCents < 0) continue;
+        extraLines.push({
+          itemType: "fee",
+          refCode: normalizeString(action.refCode) || match.ruleKey,
+          label: normalizeString(action.label) || match.name,
+          unit,
+          qty,
+          unitPriceCents: Math.round(amountCents),
+          totalCents: Math.round(qty * Math.round(amountCents)),
+          source: { businessRuleId: match.id, businessRuleKey: match.ruleKey },
+        });
+        hits.push(buildBusinessRuleHit(match, actionType, { itemType: "fee", refCode: normalizeString(action.refCode) || match.ruleKey }));
+      }
+    }
+  }
+  return { ok: true, extraLines, hits, matches: evaluation.matches || [] };
+}
+
+async function applyPricingLineBusinessRules({ line, context, atDate = null } = {}) {
+  const workingLine = line && typeof line === "object" ? JSON.parse(JSON.stringify(line)) : {};
+  const evaluation = await evaluateBusinessRuleDomains({
+    domains: ["pricing_line", "municipal_pricing_line", "contract_pricing_line"],
+    context: { ...(context || {}), line: workingLine },
+    atDate,
+  });
+  const hits = [];
+  for (const match of evaluation.matches || []) {
+    for (const action of match.actions || []) {
+      const actionType = normalizeKey(action.type);
+      if (actionType === "deny") return { ok: false, error: normalizeString(action.errorCode) || "business_rule_denied", message: normalizeString(action.message) || null, hits };
+      if (actionType === "adjust_unit_price" && businessRuleActionTargetsLine(action, workingLine)) {
+        const nextUnitPrice = applyBusinessRuleUnitPriceAdjustment({
+          unitPriceCents: workingLine.unitPriceCents,
+          mode: normalizeKey(action.mode) || "replace",
+          value: resolveBusinessRuleActionValue(action, { ...(context || {}), line: workingLine }, 0),
+        });
+        workingLine.unitPriceCents = nextUnitPrice;
+        workingLine.totalCents = Math.round((Number(workingLine.qty) || 0) * nextUnitPrice);
+        workingLine.source = { ...(workingLine.source || {}), businessRuleId: match.id, businessRuleKey: match.ruleKey };
+        hits.push(buildBusinessRuleHit(match, actionType, { itemType: workingLine.itemType, refCode: workingLine.refCode }));
+      }
+      if (actionType === "set_field") {
+        const rawPath = normalizeString(action.path);
+        const linePath = rawPath.startsWith("line.") ? rawPath.slice("line.".length) : rawPath;
+        if (linePath) {
+          setBusinessRulePathValue(workingLine, linePath, resolveBusinessRuleActionValue(action, { ...(context || {}), line: workingLine }, null));
+          if (linePath === "unitPriceCents") workingLine.totalCents = Math.round((Number(workingLine.qty) || 0) * Math.max(0, Math.round(Number(workingLine.unitPriceCents) || 0)));
+          hits.push(buildBusinessRuleHit(match, actionType, { itemType: workingLine.itemType, refCode: workingLine.refCode, path: linePath }));
+        }
+      }
+    }
+  }
+  return { ok: true, line: workingLine, hits, matches: evaluation.matches || [] };
+}
+
 async function createWasteOrder({ body, username }) {
   if (!pool) return { ok: false, error: "db_required" };
   const containerSourceKey = normalizeString(body.containerSourceKey);
@@ -4424,57 +9116,31 @@ async function createWasteOrder({ body, username }) {
   if (plannedVolumeCbm !== null && plannedVolumeCbm < 0) return { ok: false, error: "invalid_plannedVolumeCbm" };
 
   let customerRefId = null;
+  let customer = null;
   if (customerId) {
-    const c = await pool
-      .query(
-        `
-        select id
-        from crm_customer
-        where id = $1 or customer_no = $1
-        limit 1;
-        `,
-        [customerId],
-      )
-      .then((r) => r.rows[0] || null);
-    if (!c) return { ok: false, error: "customer_not_found" };
-    customerRefId = c.id;
+    customer = await getCustomerByIdOrNo(customerId);
+    if (!customer) return { ok: false, error: "customer_not_found" };
+    customerRefId = customer.id;
   }
 
+  let contract = null;
   if (contractId) {
-    const ok = await pool
-      .query(
-        `
-        select id
-        from crm_contract
-        where id = $1
-        limit 1;
-        `,
-        [contractId],
-      )
-      .then((r) => r.rows[0] || null);
-    if (!ok) return { ok: false, error: "contract_not_found" };
+    contract = await getContractById(contractId);
+    if (!contract) return { ok: false, error: "contract_not_found" };
   }
 
+  let municipality = null;
   if (municipalityId) {
-    const ok = await pool
-      .query(
-        `
-        select id
-        from waste_municipality
-        where id = $1 or code = $1
-        limit 1;
-        `,
-        [municipalityId],
-      )
-      .then((r) => r.rows[0] || null);
-    if (!ok) return { ok: false, error: "municipality_not_found" };
+    municipality = await getMunicipalityByIdOrCode(municipalityId);
+    if (!municipality) return { ok: false, error: "municipality_not_found" };
   }
 
+  let disposalSite = null;
   if (disposalSiteId) {
-    const ok = await pool
+    disposalSite = await pool
       .query(
         `
-        select id
+        select id, code, municipality_id
         from waste_disposal_site
         where id = $1 or code = $1
         limit 1;
@@ -4482,7 +9148,7 @@ async function createWasteOrder({ body, username }) {
         [disposalSiteId],
       )
       .then((r) => r.rows[0] || null);
-    if (!ok) return { ok: false, error: "disposal_site_not_found" };
+    if (!disposalSite) return { ok: false, error: "disposal_site_not_found" };
   }
 
   if (materialCode) {
@@ -4507,6 +9173,65 @@ async function createWasteOrder({ body, username }) {
   const notes = normalizeString(body.notes) || null;
   const legal = body.legal && typeof body.legal === "object" ? body.legal : {};
 
+  const orderDraft = {
+    customerId,
+    customerRefId,
+    contractId,
+    customerTier,
+    site,
+    containerSourceKey,
+    serviceType,
+    windowDeliverStart: deliverStart.toISOString(),
+    windowDeliverEnd: deliverEnd.toISOString(),
+    windowPickupStart: pickupStart ? pickupStart.toISOString() : null,
+    windowPickupEnd: pickupEnd ? pickupEnd.toISOString() : null,
+    context,
+    priorityUrgency,
+    priorityValue,
+    notes,
+    municipalityId,
+    disposalSiteId,
+    materialCode,
+    plannedTons,
+    plannedVolumeCbm,
+    legal,
+  };
+  const ruleEval = await applyWasteOrderBusinessRules({
+    draft: orderDraft,
+    customer,
+    contract,
+    municipality,
+    container,
+    atDate: deliverStart.toISOString().slice(0, 10),
+  });
+  if (!ruleEval.ok) return { ok: false, error: ruleEval.error };
+  const effectiveDraft = ruleEval.draft;
+
+  let persistedMunicipalityId = normalizeString(effectiveDraft.municipalityId) || null;
+  if (persistedMunicipalityId) {
+    const resolvedMunicipality = await getMunicipalityByIdOrCode(persistedMunicipalityId);
+    if (!resolvedMunicipality) return { ok: false, error: "municipality_not_found" };
+    persistedMunicipalityId = resolvedMunicipality.id;
+  }
+
+  let persistedDisposalSiteId = normalizeString(effectiveDraft.disposalSiteId) || null;
+  if (persistedDisposalSiteId) {
+    const resolvedDisposalSite = await pool
+      .query(
+        `
+        select id
+        from waste_disposal_site
+        where id = $1 or code = $1
+        limit 1;
+        `,
+        [persistedDisposalSiteId],
+      )
+      .then((r) => r.rows[0] || null)
+      .catch(() => null);
+    if (!resolvedDisposalSite) return { ok: false, error: "disposal_site_not_found" };
+    persistedDisposalSiteId = resolvedDisposalSite.id;
+  }
+
   const id = `ord_${crypto.randomUUID().slice(0, 12)}`;
   const nowIso = new Date().toISOString();
   await pool.query(
@@ -4522,27 +9247,27 @@ async function createWasteOrder({ body, username }) {
     `,
     [
       id,
-      customerId,
-      customerRefId,
-      contractId,
-      customerTier,
-      site,
-      containerSourceKey,
-      serviceType,
-      deliverStart.toISOString(),
-      deliverEnd.toISOString(),
-      pickupStart ? pickupStart.toISOString() : null,
-      pickupEnd ? pickupEnd.toISOString() : null,
-      context,
-      priorityUrgency,
-      priorityValue,
-      notes,
-      municipalityId,
-      disposalSiteId,
-      materialCode,
-      plannedTons,
-      plannedVolumeCbm,
-      JSON.stringify(legal || {}),
+      effectiveDraft.customerId || null,
+      effectiveDraft.customerRefId || null,
+      effectiveDraft.contractId || null,
+      effectiveDraft.customerTier || null,
+      effectiveDraft.site || {},
+      effectiveDraft.containerSourceKey,
+      effectiveDraft.serviceType,
+      effectiveDraft.windowDeliverStart,
+      effectiveDraft.windowDeliverEnd,
+      effectiveDraft.windowPickupStart || null,
+      effectiveDraft.windowPickupEnd || null,
+      effectiveDraft.context || {},
+      effectiveDraft.priorityUrgency,
+      effectiveDraft.priorityValue,
+      effectiveDraft.notes || null,
+      persistedMunicipalityId,
+      persistedDisposalSiteId,
+      effectiveDraft.materialCode || null,
+      effectiveDraft.plannedTons,
+      effectiveDraft.plannedVolumeCbm,
+      JSON.stringify(effectiveDraft.legal || {}),
       username,
       nowIso,
       nowIso,
@@ -4560,7 +9285,7 @@ async function createWasteOrder({ body, username }) {
     blockReason: null,
     overrideId: id,
     overrideReason: null,
-    meta: { containerSourceKey, serviceType, windowDeliverStart: deliverStart.toISOString(), windowDeliverEnd: deliverEnd.toISOString() },
+    meta: { containerSourceKey: effectiveDraft.containerSourceKey, serviceType: effectiveDraft.serviceType, windowDeliverStart: effectiveDraft.windowDeliverStart, windowDeliverEnd: effectiveDraft.windowDeliverEnd, businessRuleHits: ruleEval.hits || [] },
   });
   await publishErpEvent({
     eventType: "WASTE_ORDER_CREATED",
@@ -4572,8 +9297,8 @@ async function createWasteOrder({ body, username }) {
       id,
       customerId: customerRefId || null,
       contractId: contractId || null,
-      municipalityId: municipalityId || null,
-      disposalSiteId: disposalSiteId || null,
+      municipalityId: persistedMunicipalityId,
+      disposalSiteId: persistedDisposalSiteId,
       serviceType,
       materialCode: materialCode || null,
       windowDeliverStart: deliverStart.toISOString(),
@@ -4847,6 +9572,26 @@ async function createMockInvoiceDraft({ orderId, currency, lines, username }) {
     [id, orderId, cur, totalCents, linesJson, username, createdAt],
   );
 
+  const costCenter =
+    order.municipalityId ? `municipality:${order.municipalityId}` :
+    order.disposalSiteId ? `disposal_site:${order.disposalSiteId}` :
+    null;
+  await createFinanceEntry({
+    entryType: "revenue",
+    objectType: "waste_order",
+    objectId: order.id,
+    currency: cur,
+    amountCents: totalCents,
+    occurredAt: createdAt,
+    costCenter,
+    account: "revenue_waste_invoice_draft",
+    sourceModule: "billing",
+    sourceRefType: "waste_invoice_draft",
+    sourceRefId: id,
+    meta: { orderId: order.id, invoiceDraftId: id, source: "mock", customerId: order.customerRefId || null, contractId: order.contractId || null },
+    createdBy: username,
+  });
+
   await insertAuditLog({
     id: `al_${crypto.randomUUID()}`,
     eventType: "WASTE_ORDER_INVOICED",
@@ -4945,6 +9690,34 @@ async function createInvoiceDraftFromPricing({ orderId, pricingCalculationId = n
       JSON.stringify({ pricing: { calculationId: calc.id, algorithmVersion: calc.algorithmVersion }, customerId: order.customerRefId || null, contractId: order.contractId || null }),
     ],
   );
+
+  const costCenter =
+    order.municipalityId ? `municipality:${order.municipalityId}` :
+    order.disposalSiteId ? `disposal_site:${order.disposalSiteId}` :
+    null;
+  await createFinanceEntry({
+    entryType: "revenue",
+    objectType: "waste_order",
+    objectId: order.id,
+    currency,
+    amountCents: totalCents,
+    occurredAt: createdAt,
+    costCenter,
+    account: "revenue_waste_invoice_draft",
+    sourceModule: "billing",
+    sourceRefType: "waste_invoice_draft",
+    sourceRefId: id,
+    meta: {
+      orderId: order.id,
+      invoiceDraftId: id,
+      source: "pricing_v1",
+      pricingCalculationId: calc.id,
+      algorithmVersion: calc.algorithmVersion,
+      customerId: order.customerRefId || null,
+      contractId: order.contractId || null,
+    },
+    createdBy: username,
+  });
 
   await insertAuditLog({
     id: `al_${crypto.randomUUID()}`,
@@ -5759,6 +10532,414 @@ async function listContracts({ customerId = null, status = null, limit = 50 } = 
   return out;
 }
 
+function normalizePortalType(value) {
+  const v = normalizeString(value).toLowerCase();
+  return v === "customer" || v === "subcontractor" ? v : null;
+}
+
+async function writePortalAudit({ accountId = null, action, actor, meta = {} }) {
+  if (!pool) return;
+  const act = normalizeString(action);
+  const who = normalizeString(actor) || "system";
+  if (!act) return;
+  await pool.query(
+    `
+    insert into portal_audit
+      (id, account_id, action, actor, meta, occurred_at)
+    values
+      ($1, $2, $3, $4, $5::jsonb, $6);
+    `,
+    [`paua_${crypto.randomUUID().slice(0, 18)}`, normalizeString(accountId) || null, act, who, JSON.stringify(meta || {}), new Date().toISOString()],
+  ).catch(() => {});
+}
+
+async function getPortalAccountById(accountId) {
+  if (!pool) return null;
+  const id = normalizeString(accountId);
+  if (!id) return null;
+  const row = await pool
+    .query(
+      `
+      select
+        a.id, a.portal_type, a.display_name, a.email, a.password_hash, a.customer_id, a.supplier_id,
+        a.active, a.settings, a.last_login_at, a.created_by, a.updated_by, a.created_at, a.updated_at,
+        c.customer_no, c.name as customer_name,
+        s.name as supplier_name
+      from portal_account a
+      left join crm_customer c on c.id = a.customer_id
+      left join workshop_inventory_supplier s on s.id = a.supplier_id
+      where a.id = $1
+      limit 1;
+      `,
+      [id],
+    )
+    .then((r) => r.rows[0] || null)
+    .catch(() => null);
+  if (!row) return null;
+  return {
+    id: row.id,
+    portalType: row.portal_type,
+    displayName: row.display_name,
+    email: row.email,
+    passwordHash: row.password_hash,
+    customerId: row.customer_id || null,
+    supplierId: row.supplier_id || null,
+    customerNo: row.customer_no || null,
+    customerName: row.customer_name || null,
+    supplierName: row.supplier_name || null,
+    active: Boolean(row.active),
+    settings: row.settings || {},
+    lastLoginAt: row.last_login_at ? new Date(row.last_login_at).toISOString() : null,
+    createdBy: row.created_by,
+    updatedBy: row.updated_by,
+    createdAt: new Date(row.created_at).toISOString(),
+    updatedAt: new Date(row.updated_at).toISOString(),
+  };
+}
+
+async function getPortalAccountByEmail(email) {
+  if (!pool) return null;
+  const em = normalizeString(email).toLowerCase();
+  if (!em) return null;
+  const row = await pool
+    .query(`select id from portal_account where lower(email) = $1 limit 1;`, [em])
+    .then((r) => r.rows[0] || null)
+    .catch(() => null);
+  return row ? await getPortalAccountById(row.id) : null;
+}
+
+async function listPortalAccounts({ portalType = null, limit = 100 } = {}) {
+  if (!pool) return [];
+  const pt = normalizePortalType(portalType);
+  const n = Math.max(1, Math.min(500, Number(limit) || 100));
+  const rows = await pool
+    .query(
+      `
+      select id
+      from portal_account
+      where ($1::text is null or portal_type = $1)
+      order by updated_at desc, id desc
+      limit $2;
+      `,
+      [pt, n],
+    )
+    .then((r) => r.rows)
+    .catch(() => []);
+  const items = [];
+  for (const row of rows) {
+    const item = await getPortalAccountById(row.id);
+    if (item) items.push(item);
+  }
+  return items;
+}
+
+async function upsertPortalAccount({ id = null, portalType, displayName, email, password, customerId = null, supplierId = null, active = true, settings = {}, username }) {
+  if (!pool) return { ok: false, error: "db_required" };
+  const pt = normalizePortalType(portalType);
+  const dn = normalizeString(displayName);
+  const em = normalizeString(email).toLowerCase();
+  const pw = String(password || "");
+  const actor = normalizeString(username) || "system";
+  if (!pt) return { ok: false, error: "portalType_invalid" };
+  if (!dn) return { ok: false, error: "displayName_required" };
+  if (!em) return { ok: false, error: "email_required" };
+  if (pw.length < 8) return { ok: false, error: "password_too_short" };
+  let customer = null;
+  let supplier = null;
+  if (pt === "customer") {
+    customer = await getCustomerByIdOrNo(customerId);
+    if (!customer) return { ok: false, error: "customer_not_found" };
+  } else if (pt === "subcontractor") {
+    const sid = normalizeString(supplierId);
+    if (!sid) return { ok: false, error: "supplierId_required" };
+    supplier = await pool
+      .query(`select id, name from workshop_inventory_supplier where id = $1 limit 1;`, [sid])
+      .then((r) => r.rows[0] || null)
+      .catch(() => null);
+    if (!supplier) return { ok: false, error: "supplier_not_found" };
+  }
+  const aid = normalizeString(id) || `pacc_${crypto.randomUUID().slice(0, 18)}`;
+  await pool.query(
+    `
+    insert into portal_account
+      (id, portal_type, display_name, email, password_hash, customer_id, supplier_id, active, settings, created_by, updated_by, created_at, updated_at)
+    values
+      ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,$11, now(), now())
+    on conflict (email) do update
+      set portal_type = excluded.portal_type,
+          display_name = excluded.display_name,
+          password_hash = excluded.password_hash,
+          customer_id = excluded.customer_id,
+          supplier_id = excluded.supplier_id,
+          active = excluded.active,
+          settings = excluded.settings,
+          updated_by = excluded.updated_by,
+          updated_at = excluded.updated_at;
+    `,
+    [aid, pt, dn, em, hashPortalPassword(pw), customer ? customer.id : null, supplier ? supplier.id : null, active === true, JSON.stringify(settings || {}), actor, actor],
+  );
+  const item = await getPortalAccountByEmail(em);
+  await writePortalAudit({ accountId: item ? item.id : aid, action: "portal_account_upserted", actor, meta: { portalType: pt, email: em } });
+  return { ok: true, item };
+}
+
+async function touchPortalLogin(accountId) {
+  if (!pool) return;
+  await pool.query(`update portal_account set last_login_at = now(), updated_at = now() where id = $1;`, [accountId]).catch(() => {});
+}
+
+async function upsertPortalAssignment({ accountId, scopeType, scopeId, accessLevel = "rw", status = "active", meta = {}, username }) {
+  if (!pool) return { ok: false, error: "db_required" };
+  const aid = normalizeString(accountId);
+  const st = normalizeString(scopeType).toLowerCase();
+  const sid = normalizeString(scopeId);
+  const al = normalizeString(accessLevel).toLowerCase() === "r" ? "r" : "rw";
+  const stat = normalizeString(status).toLowerCase() === "revoked" ? "revoked" : "active";
+  const actor = normalizeString(username) || "system";
+  if (!aid) return { ok: false, error: "accountId_required" };
+  if (!["order", "route"].includes(st)) return { ok: false, error: "scopeType_invalid" };
+  if (!sid) return { ok: false, error: "scopeId_required" };
+  const account = await getPortalAccountById(aid);
+  if (!account) return { ok: false, error: "portal_account_not_found" };
+  if (st === "order") {
+    const order = await getWasteOrderById(sid);
+    if (!order) return { ok: false, error: "order_not_found" };
+  } else {
+    const route = await pool.query(`select id from waste_route where id = $1 limit 1;`, [sid]).then((r) => r.rows[0] || null).catch(() => null);
+    if (!route) return { ok: false, error: "route_not_found" };
+  }
+  const id = `pass_${crypto.randomUUID().slice(0, 18)}`;
+  await pool.query(
+    `
+    insert into portal_assignment
+      (id, account_id, scope_type, scope_id, access_level, status, meta, created_by, created_at)
+    values
+      ($1,$2,$3,$4,$5,$6,$7::jsonb,$8, now())
+    on conflict (account_id, scope_type, scope_id) do update
+      set access_level = excluded.access_level,
+          status = excluded.status,
+          meta = excluded.meta,
+          created_by = excluded.created_by;
+    `,
+    [id, aid, st, sid, al, stat, JSON.stringify(meta || {}), actor],
+  );
+  await writePortalAudit({ accountId: aid, action: "portal_assignment_upserted", actor, meta: { scopeType: st, scopeId: sid, accessLevel: al, status: stat } });
+  return { ok: true };
+}
+
+async function listPortalAssignments({ accountId, scopeType = null, activeOnly = true } = {}) {
+  if (!pool) return [];
+  const aid = normalizeString(accountId);
+  const st = scopeType ? normalizeString(scopeType).toLowerCase() : null;
+  if (!aid) return [];
+  const rows = await pool
+    .query(
+      `
+      select id, account_id, scope_type, scope_id, access_level, status, meta, created_by, created_at
+      from portal_assignment
+      where account_id = $1
+        and ($2::text is null or scope_type = $2)
+        and ($3::boolean = false or status = 'active')
+      order by created_at desc, id desc;
+      `,
+      [aid, st, activeOnly === true],
+    )
+    .then((r) => r.rows)
+    .catch(() => []);
+  return rows.map((row) => ({
+    id: row.id,
+    accountId: row.account_id,
+    scopeType: row.scope_type,
+    scopeId: row.scope_id,
+    accessLevel: row.access_level,
+    status: row.status,
+    meta: row.meta || {},
+    createdBy: row.created_by,
+    createdAt: new Date(row.created_at).toISOString(),
+  }));
+}
+
+async function upsertPortalDocumentLink({ accountId, documentId, label = null, meta = {}, username }) {
+  if (!pool) return { ok: false, error: "db_required" };
+  const aid = normalizeString(accountId);
+  const did = normalizeString(documentId);
+  const actor = normalizeString(username) || "system";
+  if (!aid) return { ok: false, error: "accountId_required" };
+  if (!did) return { ok: false, error: "documentId_required" };
+  const account = await getPortalAccountById(aid);
+  if (!account) return { ok: false, error: "portal_account_not_found" };
+  const doc = await getDocumentById(did);
+  if (!doc) return { ok: false, error: "document_not_found" };
+  const id = `pdoc_${crypto.randomUUID().slice(0, 18)}`;
+  await pool.query(
+    `
+    insert into portal_document_link
+      (id, account_id, document_id, label, meta, created_by, created_at)
+    values
+      ($1,$2,$3,$4,$5::jsonb,$6, now())
+    on conflict (account_id, document_id) do update
+      set label = excluded.label,
+          meta = excluded.meta,
+          created_by = excluded.created_by;
+    `,
+    [id, aid, did, normalizeString(label) || null, JSON.stringify(meta || {}), actor],
+  );
+  await writePortalAudit({ accountId: aid, action: "portal_document_linked", actor, meta: { documentId: did } });
+  return { ok: true };
+}
+
+async function listPortalDocuments({ accountId, limit = 50 } = {}) {
+  if (!pool) return [];
+  const aid = normalizeString(accountId);
+  const n = Math.max(1, Math.min(200, Number(limit) || 50));
+  if (!aid) return [];
+  const rows = await pool
+    .query(
+      `
+      select id, document_id, label, meta, created_by, created_at
+      from portal_document_link
+      where account_id = $1
+      order by created_at desc
+      limit $2;
+      `,
+      [aid, n],
+    )
+    .then((r) => r.rows)
+    .catch(() => []);
+  const items = [];
+  for (const row of rows) {
+    const doc = await getDocumentById(row.document_id);
+    if (!doc) continue;
+    items.push({
+      id: row.id,
+      label: row.label || null,
+      meta: row.meta || {},
+      createdBy: row.created_by,
+      createdAt: new Date(row.created_at).toISOString(),
+      document: doc,
+    });
+  }
+  return items;
+}
+
+async function listPortalOrders({ account, limit = 50 } = {}) {
+  if (!pool || !account) return [];
+  const n = Math.max(1, Math.min(200, Number(limit) || 50));
+  const portalType = normalizePortalType(account.portalType);
+  if (portalType === "customer") {
+    const rows = await pool
+      .query(
+        `
+        select id
+        from waste_container_order
+        where customer_ref_id = $1 or customer_id = $1
+        order by created_at desc
+        limit $2;
+        `,
+        [account.customerId, n],
+      )
+      .then((r) => r.rows)
+      .catch(() => []);
+    const items = [];
+    for (const row of rows) {
+      const order = await getWasteOrderById(row.id);
+      if (order) items.push(order);
+    }
+    return items;
+  }
+  const assignments = await listPortalAssignments({ accountId: account.id, activeOnly: true });
+  const orderIds = new Set(assignments.filter((x) => x.scopeType === "order").map((x) => x.scopeId));
+  const routeIds = assignments.filter((x) => x.scopeType === "route").map((x) => x.scopeId);
+  if (routeIds.length) {
+    const rows = await pool
+      .query(`select distinct order_id from waste_route_stop where route_id = any($1::text[]) and order_id is not null;`, [routeIds])
+      .then((r) => r.rows)
+      .catch(() => []);
+    for (const row of rows) orderIds.add(row.order_id);
+  }
+  const items = [];
+  for (const id of Array.from(orderIds).slice(0, n)) {
+    const order = await getWasteOrderById(id);
+    if (order) items.push(order);
+  }
+  return items.sort((a, b) => String(b.updatedAt || b.createdAt || "").localeCompare(String(a.updatedAt || a.createdAt || "")));
+}
+
+async function listPortalRoutes({ accountId, limit = 50 } = {}) {
+  if (!pool) return [];
+  const assignments = await listPortalAssignments({ accountId, scopeType: "route", activeOnly: true });
+  const routeIds = assignments.map((x) => x.scopeId).slice(0, Math.max(1, Math.min(200, Number(limit) || 50)));
+  const items = [];
+  for (const routeId of routeIds) {
+    const row = await pool
+      .query(
+        `
+        select
+          id, day, depot_code, municipality_id, disposal_site_id, status, vehicle_id, driver_id,
+          planned_start_at, planned_end_at, capacity_max_kg, capacity_max_cbm, meta, created_by, created_at, updated_at
+        from waste_route
+        where id = $1
+        limit 1;
+        `,
+        [routeId],
+      )
+      .then((r) => r.rows[0] || null)
+      .catch(() => null);
+    if (!row) continue;
+    const stopCount = await pool.query(`select count(*)::int as n from waste_route_stop where route_id = $1;`, [routeId]).then((r) => Number(r.rows[0]?.n) || 0).catch(() => 0);
+    items.push({
+      id: row.id,
+      day: String(row.day).slice(0, 10),
+      depotCode: row.depot_code || null,
+      municipalityId: row.municipality_id || null,
+      disposalSiteId: row.disposal_site_id || null,
+      status: row.status,
+      vehicleId: row.vehicle_id || null,
+      driverId: row.driver_id || null,
+      plannedStartAt: row.planned_start_at ? new Date(row.planned_start_at).toISOString() : null,
+      plannedEndAt: row.planned_end_at ? new Date(row.planned_end_at).toISOString() : null,
+      capacityMaxKg: row.capacity_max_kg === null ? null : Number(row.capacity_max_kg),
+      capacityMaxCbm: row.capacity_max_cbm === null ? null : Number(row.capacity_max_cbm),
+      stopCount,
+      meta: row.meta || {},
+      createdBy: row.created_by,
+      createdAt: new Date(row.created_at).toISOString(),
+      updatedAt: new Date(row.updated_at).toISOString(),
+    });
+  }
+  return items;
+}
+
+async function buildPortalDashboard(account) {
+  const orders = await listPortalOrders({ account, limit: 20 });
+  const documents = await listPortalDocuments({ accountId: account.id, limit: 10 });
+  const contracts = account.portalType === "customer" && account.customerId ? await listContracts({ customerId: account.customerId, limit: 10 }) : [];
+  const routes = account.portalType === "subcontractor" ? await listPortalRoutes({ accountId: account.id, limit: 10 }) : [];
+  const openOrders = orders.filter((x) => !["closed", "cancelled"].includes(x.status));
+  const pendingOrders = orders.filter((x) => ["created", "validated", "dispatch_checked", "scheduled", "pickup_requested", "delivered"].includes(x.status));
+  return {
+    account: {
+      id: account.id,
+      portalType: account.portalType,
+      displayName: account.displayName,
+      email: account.email,
+      customerId: account.customerId || null,
+      supplierId: account.supplierId || null,
+    },
+    summary: {
+      openOrderCount: openOrders.length,
+      pendingOrderCount: pendingOrders.length,
+      contractCount: contracts.length,
+      documentCount: documents.length,
+      routeCount: routes.length,
+    },
+    recentOrders: orders.slice(0, 5),
+    recentDocuments: documents.slice(0, 5),
+    contracts: contracts.slice(0, 5),
+    routes: routes.slice(0, 5),
+  };
+}
+
 async function setContractStatus({ contractId, toStatus, username, reason }) {
   if (!pool) return { ok: false, error: "db_required" };
   const id = normalizeString(contractId);
@@ -6398,8 +11579,10 @@ async function calculatePricingForWasteOrder({ orderId, at = null, priceListId =
   const algorithmVersion = "pricing_v1";
 
   const customerId = order.customerRefId || null;
+  const customer = customerId ? await getCustomerByIdOrNo(customerId) : null;
   let contract = order.contractId ? await getContractById(order.contractId) : null;
   if (!contract && customerId) contract = await getActiveContractForCustomer({ customerId, atDate });
+  const municipality = order.municipalityId ? await getMunicipalityByIdOrCode(order.municipalityId) : null;
 
   const requestedPriceListId = normalizeString(priceListId) || null;
   const pl = requestedPriceListId ? await getPriceListById(requestedPriceListId) : await getActivePriceListAt({ atDate });
@@ -6418,6 +11601,16 @@ async function calculatePricingForWasteOrder({ orderId, at = null, priceListId =
   const hits = [];
   const lines = [];
   const currency = pl.currency || "EUR";
+  const pricingContext = {
+    order,
+    customer,
+    contract,
+    municipality,
+    priceList: pl,
+    qty: { tons, weighTicketId: wt ? wt.id : null },
+    calculatedAt,
+    atDate,
+  };
 
   const serviceQty = 1;
   const serviceItem = await getPriceListItemForQty({ priceListId: pl.id, itemType: "service", refCode: order.serviceType, qty: serviceQty });
@@ -6429,16 +11622,23 @@ async function calculatePricingForWasteOrder({ orderId, at = null, priceListId =
   const serviceApplied = applyOverrideToUnitPrice({ unitPriceCents: serviceUnitPrice, override: serviceOverride });
   if (serviceApplied.rule) hits.push({ itemType: "service", refCode: order.serviceType, rule: serviceApplied.rule });
   serviceUnitPrice = serviceApplied.unitPriceCents;
-  lines.push({
-    itemType: "service",
-    refCode: order.serviceType,
-    label: `Service ${order.serviceType}`,
-    unit: serviceItem.unit,
-    qty: serviceQty,
-    unitPriceCents: serviceUnitPrice,
-    totalCents: Math.round(serviceQty * serviceUnitPrice),
-    source: { priceListItemId: serviceItem.id, overrideId: serviceOverride ? serviceOverride.id : null },
+  const serviceRuleLine = await applyPricingLineBusinessRules({
+    line: {
+      itemType: "service",
+      refCode: order.serviceType,
+      label: `Service ${order.serviceType}`,
+      unit: serviceItem.unit,
+      qty: serviceQty,
+      unitPriceCents: serviceUnitPrice,
+      totalCents: Math.round(serviceQty * serviceUnitPrice),
+      source: { priceListItemId: serviceItem.id, overrideId: serviceOverride ? serviceOverride.id : null },
+    },
+    context: pricingContext,
+    atDate,
   });
+  if (!serviceRuleLine.ok) return { ok: false, error: serviceRuleLine.error };
+  hits.push(...(serviceRuleLine.hits || []));
+  lines.push(serviceRuleLine.line);
 
   if (order.materialCode) {
     const materialQty = tons;
@@ -6451,16 +11651,23 @@ async function calculatePricingForWasteOrder({ orderId, at = null, priceListId =
     const materialApplied = applyOverrideToUnitPrice({ unitPriceCents: materialUnitPrice, override: materialOverride });
     if (materialApplied.rule) hits.push({ itemType: "material", refCode: order.materialCode, rule: materialApplied.rule });
     materialUnitPrice = materialApplied.unitPriceCents;
-    lines.push({
-      itemType: "material",
-      refCode: order.materialCode,
-      label: `Material ${order.materialCode}`,
-      unit: materialItem.unit,
-      qty: materialQty,
-      unitPriceCents: materialUnitPrice,
-      totalCents: Math.round(materialQty * materialUnitPrice),
-      source: { priceListItemId: materialItem.id, overrideId: materialOverride ? materialOverride.id : null },
+    const materialRuleLine = await applyPricingLineBusinessRules({
+      line: {
+        itemType: "material",
+        refCode: order.materialCode,
+        label: `Material ${order.materialCode}`,
+        unit: materialItem.unit,
+        qty: materialQty,
+        unitPriceCents: materialUnitPrice,
+        totalCents: Math.round(materialQty * materialUnitPrice),
+        source: { priceListItemId: materialItem.id, overrideId: materialOverride ? materialOverride.id : null },
+      },
+      context: pricingContext,
+      atDate,
     });
+    if (!materialRuleLine.ok) return { ok: false, error: materialRuleLine.error };
+    hits.push(...(materialRuleLine.hits || []));
+    lines.push(materialRuleLine.line);
   }
 
   const fees = await listFees({ activeOnly: true, at: atDate, limit: 200 });
@@ -6469,17 +11676,29 @@ async function calculatePricingForWasteOrder({ orderId, at = null, priceListId =
     const feeOverride = customerId ? await getOverrideForQty({ customerId, contractId: contract ? contract.id : null, itemType: "fee", refCode: fee.code, atDate, qty }) : null;
     const applied = applyOverrideToUnitPrice({ unitPriceCents: fee.amountCents, override: feeOverride });
     if (applied.rule) hits.push({ itemType: "fee", refCode: fee.code, rule: applied.rule });
-    lines.push({
-      itemType: "fee",
-      refCode: fee.code,
-      label: fee.name,
-      unit: fee.calculationMode === "per_ton" ? "t" : "order",
-      qty,
-      unitPriceCents: applied.unitPriceCents,
-      totalCents: Math.round(qty * applied.unitPriceCents),
-      source: { feeId: fee.id, overrideId: feeOverride ? feeOverride.id : null },
+    const feeRuleLine = await applyPricingLineBusinessRules({
+      line: {
+        itemType: "fee",
+        refCode: fee.code,
+        label: fee.name,
+        unit: fee.calculationMode === "per_ton" ? "t" : "order",
+        qty,
+        unitPriceCents: applied.unitPriceCents,
+        totalCents: Math.round(qty * applied.unitPriceCents),
+        source: { feeId: fee.id, overrideId: feeOverride ? feeOverride.id : null },
+      },
+      context: pricingContext,
+      atDate,
     });
+    if (!feeRuleLine.ok) return { ok: false, error: feeRuleLine.error };
+    hits.push(...(feeRuleLine.hits || []));
+    lines.push(feeRuleLine.line);
   }
+
+  const aggregateRules = await applyPricingAggregateBusinessRules({ context: pricingContext, atDate });
+  if (!aggregateRules.ok) return { ok: false, error: aggregateRules.error };
+  hits.push(...(aggregateRules.hits || []));
+  lines.push(...(aggregateRules.extraLines || []));
 
   const totalCents = lines.reduce((sum, l) => sum + Math.round(l.totalCents), 0);
   const calcId = `pc_${crypto.randomUUID().slice(0, 12)}`;
@@ -8895,47 +14114,1037 @@ async function buildNotifications() {
   return items;
 }
 
-const server = http.createServer(async (req, res) => {
-  const method = req.method || "GET";
-  const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
-  const originalPathname = url.pathname;
-  const apiVersionContext = parseApiVersionContext(originalPathname);
-  if (!apiVersionContext.ok && apiVersionContext.unsupported) {
-    res.writeHead(400, { "content-type": "application/json; charset=utf-8" });
-    return res.end(JSON.stringify({ error: "bad_request", message: "api_version_not_supported", requestedVersion: apiVersionContext.requestedVersion }));
-  }
-  if (originalPathname === "/api" || originalPathname.startsWith("/api/")) {
-    applyApiVersionHeaders(res, apiVersionContext);
-    url.pathname = apiVersionContext.routePath;
-  }
-  const auth = getAuth(req);
-  const requestId = `req_${crypto.randomUUID().slice(0, 12)}`;
-  const startedMs = Date.now();
-  res.setHeader("x-request-id", requestId);
-  res.on("finish", () => {
-    const ms = Date.now() - startedMs;
-    observeHttpRequest({ method, path: originalPathname, status: res.statusCode, ms });
-    logJson({
-      ts: new Date().toISOString(),
-      level: "info",
-      event: "http_request",
-      requestId,
-      method,
-      path: originalPathname,
-      status: res.statusCode,
-      ms,
-      user: auth.username || null,
-      ip: req.socket && req.socket.remoteAddress ? String(req.socket.remoteAddress) : null,
-    });
+function normalizeNotificationPriority(value) {
+  const v = normalizeKey(value);
+  return ["low", "medium", "high", "critical"].includes(v) ? v : "medium";
+}
+
+function normalizeNotificationStatus(value) {
+  const v = normalizeKey(value);
+  return ["queued", "dispatched", "delivered", "acknowledged", "escalated", "breached", "resolved", "cancelled"].includes(v) ? v : "queued";
+}
+
+function normalizeNotificationChannel(value) {
+  const v = normalizeKey(value);
+  if (v === "inapp") return "in_app";
+  return v;
+}
+
+function normalizeNotificationChannels(values, fallback = ["in_app"]) {
+  const arr = Array.isArray(values) ? values : typeof values === "string" ? values.split(",") : [];
+  const out = Array.from(new Set(arr.map((x) => normalizeNotificationChannel(x)).filter(Boolean)));
+  return out.length ? out : fallback.slice();
+}
+
+function normalizeAudience(value) {
+  const v = value && typeof value === "object" ? value : {};
+  return {
+    users: Array.from(new Set((Array.isArray(v.users) ? v.users : []).map((x) => normalizeString(x)).filter(Boolean))),
+    userIds: Array.from(new Set((Array.isArray(v.userIds) ? v.userIds : []).map((x) => normalizeString(x)).filter(Boolean))),
+    permissions: Array.from(new Set((Array.isArray(v.permissions) ? v.permissions : []).map((x) => normalizeString(x)).filter(Boolean))),
+    emails: Array.from(new Set((Array.isArray(v.emails) ? v.emails : []).map((x) => normalizeString(x)).filter(Boolean))),
+    pushTargets: Array.from(new Set((Array.isArray(v.pushTargets) ? v.pushTargets : []).map((x) => normalizeString(x)).filter(Boolean))),
+  };
+}
+
+function mergeAudience(base, extra) {
+  const a = normalizeAudience(base);
+  const b = normalizeAudience(extra);
+  return normalizeAudience({
+    users: [...a.users, ...b.users],
+    userIds: [...a.userIds, ...b.userIds],
+    permissions: [...a.permissions, ...b.permissions],
+    emails: [...a.emails, ...b.emails],
+    pushTargets: [...a.pushTargets, ...b.pushTargets],
   });
-  const safeMethod = method === "GET" || method === "HEAD" || method === "OPTIONS";
-  if (!safeMethod && auth.mode === "cookie" && url.pathname !== "/api/auth/login") {
-    if (!requireCsrf(res, req)) return;
+}
+
+function audienceSummary(audience) {
+  const a = normalizeAudience(audience);
+  const parts = [];
+  if (a.users.length) parts.push(`users:${a.users.join(",")}`);
+  if (a.permissions.length) parts.push(`permissions:${a.permissions.join(",")}`);
+  if (a.emails.length) parts.push(`emails:${a.emails.join(",")}`);
+  if (a.pushTargets.length) parts.push(`push:${a.pushTargets.join(",")}`);
+  if (a.userIds.length) parts.push(`userIds:${a.userIds.join(",")}`);
+  return parts.join(" | ") || "audience";
+}
+
+function normalizeEscalationPolicy(value) {
+  const rows = Array.isArray(value) ? value : [];
+  return rows
+    .map((r, idx) => {
+      const item = r && typeof r === "object" ? r : {};
+      const level = Math.max(1, Math.floor(Number(item.level) || idx + 1));
+      const afterMinutes = Math.max(0, Math.floor(Number(item.afterMinutes) || 0));
+      const channels = normalizeNotificationChannels(item.channels, ["in_app"]);
+      return {
+        level,
+        afterMinutes,
+        channels,
+        audience: normalizeAudience(item.audience),
+        meta: item.meta && typeof item.meta === "object" ? item.meta : {},
+      };
+    })
+    .sort((a, b) => a.level - b.level || a.afterMinutes - b.afterMinutes);
+}
+
+async function appendNotificationAudit({ notificationId, eventType, actor, occurredAt = null, meta = {} }) {
+  if (!pool) return;
+  await pool
+    .query(
+      `
+      insert into notification_audit (id, notification_id, event_type, actor, occurred_at, meta)
+      values ($1,$2,$3,$4,$5,$6::jsonb);
+      `,
+      [
+        `na_${crypto.randomUUID().slice(0, 18)}`,
+        notificationId,
+        normalizeString(eventType) || "UNKNOWN",
+        normalizeString(actor) || "system",
+        occurredAt || new Date().toISOString(),
+        JSON.stringify(meta && typeof meta === "object" ? meta : {}),
+      ],
+    )
+    .catch(() => {});
+}
+
+async function listNotificationChannelConfigs() {
+  if (!pool) return [];
+  const rows = await pool
+    .query(
+      `
+      select channel, enabled, provider, config, quality_standard, updated_by, updated_at
+      from notification_channel_config
+      order by channel asc;
+      `,
+    )
+    .then((r) => r.rows)
+    .catch(() => []);
+  return rows.map((r) => ({
+    channel: r.channel,
+    enabled: Boolean(r.enabled),
+    provider: r.provider,
+    config: r.config || {},
+    qualityStandard: r.quality_standard || {},
+    updatedBy: r.updated_by,
+    updatedAt: new Date(r.updated_at).toISOString(),
+  }));
+}
+
+async function upsertNotificationChannelConfig({ channel, enabled = true, provider = "log", config = {}, qualityStandard = {}, updatedBy }) {
+  if (!pool) return { ok: false, error: "db_required" };
+  const ch = normalizeNotificationChannel(channel);
+  const pr = normalizeKey(provider || "log") || "log";
+  if (!ch) return { ok: false, error: "channel_required" };
+  await pool.query(
+    `
+    insert into notification_channel_config (channel, enabled, provider, config, quality_standard, updated_by, updated_at)
+    values ($1,$2,$3,$4::jsonb,$5::jsonb,$6, now())
+    on conflict (channel) do update
+      set enabled = excluded.enabled,
+          provider = excluded.provider,
+          config = excluded.config,
+          quality_standard = excluded.quality_standard,
+          updated_by = excluded.updated_by,
+          updated_at = excluded.updated_at;
+    `,
+    [ch, enabled === true, pr, JSON.stringify(config && typeof config === "object" ? config : {}), JSON.stringify(qualityStandard && typeof qualityStandard === "object" ? qualityStandard : {}), normalizeString(updatedBy) || "system"],
+  );
+  return { ok: true, channel: ch };
+}
+
+async function listNotificationRules({ eventType = null, activeOnly = false, limit = 200 } = {}) {
+  if (!pool) return [];
+  const ev = normalizeString(eventType) || null;
+  const n = Math.max(1, Math.min(1000, Number(limit) || 200));
+  const rows = await pool
+    .query(
+      `
+      select id, rule_key, name, active, event_type, aggregate_type, channels, priority, ack_required, sla_minutes, audience, escalation_policy, template, created_by, created_at, updated_at
+      from notification_rule
+      where ($1::text is null or event_type = $1)
+        and ($2::boolean = false or active = true)
+      order by updated_at desc, id desc
+      limit $3;
+      `,
+      [ev, activeOnly === true, n],
+    )
+    .then((r) => r.rows)
+    .catch(() => []);
+  return rows.map((r) => ({
+    id: r.id,
+    ruleKey: r.rule_key,
+    name: r.name,
+    active: Boolean(r.active),
+    eventType: r.event_type,
+    aggregateType: r.aggregate_type || null,
+    channels: Array.isArray(r.channels) ? r.channels : [],
+    priority: r.priority,
+    ackRequired: Boolean(r.ack_required),
+    slaMinutes: Number(r.sla_minutes) || 60,
+    audience: r.audience || {},
+    escalationPolicy: Array.isArray(r.escalation_policy) ? r.escalation_policy : [],
+    template: r.template || {},
+    createdBy: r.created_by,
+    createdAt: new Date(r.created_at).toISOString(),
+    updatedAt: new Date(r.updated_at).toISOString(),
+  }));
+}
+
+async function getNotificationRuleByKey(ruleKey) {
+  const key = normalizeString(ruleKey);
+  if (!key) return null;
+  const list = await listNotificationRules({ limit: 1000 });
+  return list.find((x) => x.ruleKey === key) || null;
+}
+
+async function upsertNotificationRule({ id = null, ruleKey, name, active = true, eventType, aggregateType = null, channels, priority = "medium", ackRequired = false, slaMinutes = 60, audience = {}, escalationPolicy = [], template = {}, createdBy }) {
+  if (!pool) return { ok: false, error: "db_required" };
+  const rk = normalizeString(ruleKey);
+  const nm = normalizeString(name);
+  const ev = normalizeString(eventType);
+  if (!rk) return { ok: false, error: "ruleKey_required" };
+  if (!nm) return { ok: false, error: "name_required" };
+  if (!ev) return { ok: false, error: "eventType_required" };
+  const rid = normalizeString(id) || `nr_${crypto.randomUUID().slice(0, 18)}`;
+  const ch = normalizeNotificationChannels(channels, ["in_app"]);
+  const prio = normalizeNotificationPriority(priority);
+  const sla = Math.max(1, Math.floor(Number(slaMinutes) || 60));
+  await pool.query(
+    `
+    insert into notification_rule
+      (id, rule_key, name, active, event_type, aggregate_type, channels, priority, ack_required, sla_minutes, audience, escalation_policy, template, created_by, created_at, updated_at)
+    values
+      ($1,$2,$3,$4,$5,$6,$7::text[],$8,$9,$10,$11::jsonb,$12::jsonb,$13::jsonb,$14, now(), now())
+    on conflict (rule_key) do update
+      set name = excluded.name,
+          active = excluded.active,
+          event_type = excluded.event_type,
+          aggregate_type = excluded.aggregate_type,
+          channels = excluded.channels,
+          priority = excluded.priority,
+          ack_required = excluded.ack_required,
+          sla_minutes = excluded.sla_minutes,
+          audience = excluded.audience,
+          escalation_policy = excluded.escalation_policy,
+          template = excluded.template,
+          updated_at = excluded.updated_at
+    returning id;
+    `,
+    [
+      rid,
+      rk,
+      nm,
+      active === true,
+      ev,
+      normalizeString(aggregateType) || null,
+      ch,
+      prio,
+      ackRequired === true,
+      sla,
+      JSON.stringify(normalizeAudience(audience)),
+      JSON.stringify(normalizeEscalationPolicy(escalationPolicy)),
+      JSON.stringify(template && typeof template === "object" ? template : {}),
+      normalizeString(createdBy) || "system",
+    ],
+  );
+  return { ok: true, id: rid };
+}
+
+function canViewNotificationMessage({ auth, item }) {
+  if (!item) return false;
+  if (hasAnyPermission(auth, [Permissions.FleetAdmin, Permissions.AuthAdmin, Permissions.ViewAudit])) return true;
+  const audience = normalizeAudience(item.audience);
+  if (audience.users.includes(auth.username || "")) return true;
+  if (audience.userIds.includes(auth.userId || "")) return true;
+  if (audience.permissions.some((p) => auth.permissions && auth.permissions.has(p))) return true;
+  if (normalizeString(item.createdBy) && normalizeString(item.createdBy) === normalizeString(auth.username)) return true;
+  return false;
+}
+
+async function getNotificationMessageById(notificationId) {
+  if (!pool) return null;
+  const id = normalizeString(notificationId);
+  if (!id) return null;
+  const row = await pool
+    .query(
+      `
+      select
+        n.id, n.rule_id, r.rule_key, n.event_type, n.aggregate_type, n.aggregate_id, n.title, n.message, n.priority, n.status, n.ack_required,
+        n.audience, n.channels, n.payload, n.correlation_id, n.created_by, n.created_at, n.updated_at, n.sla_due_at,
+        n.acknowledged_at, n.acknowledged_by, n.escalated_at, n.escalation_level, n.resolved_at, n.resolved_by
+      from notification_message n
+      left join notification_rule r on r.id = n.rule_id
+      where n.id = $1
+      limit 1;
+      `,
+      [id],
+    )
+    .then((r) => r.rows[0] || null)
+    .catch(() => null);
+  if (!row) return null;
+  return {
+    id: row.id,
+    ruleId: row.rule_id || null,
+    ruleKey: row.rule_key || null,
+    eventType: row.event_type,
+    aggregateType: row.aggregate_type,
+    aggregateId: row.aggregate_id,
+    title: row.title,
+    message: row.message,
+    priority: row.priority,
+    status: row.status,
+    ackRequired: Boolean(row.ack_required),
+    audience: row.audience || {},
+    channels: Array.isArray(row.channels) ? row.channels : [],
+    payload: row.payload || {},
+    correlationId: row.correlation_id || null,
+    createdBy: row.created_by,
+    createdAt: new Date(row.created_at).toISOString(),
+    updatedAt: new Date(row.updated_at).toISOString(),
+    slaDueAt: row.sla_due_at ? new Date(row.sla_due_at).toISOString() : null,
+    acknowledgedAt: row.acknowledged_at ? new Date(row.acknowledged_at).toISOString() : null,
+    acknowledgedBy: row.acknowledged_by || null,
+    escalatedAt: row.escalated_at ? new Date(row.escalated_at).toISOString() : null,
+    escalationLevel: Number(row.escalation_level) || 0,
+    resolvedAt: row.resolved_at ? new Date(row.resolved_at).toISOString() : null,
+    resolvedBy: row.resolved_by || null,
+  };
+}
+
+async function listNotificationMessages({ auth = null, status = null, includeAcknowledged = false, limit = 200, aggregateType = null, aggregateId = null } = {}) {
+  if (!pool) return [];
+  const st = normalizeString(status) || null;
+  const aggType = normalizeString(aggregateType) || null;
+  const aggId = normalizeString(aggregateId) || null;
+  const n = Math.max(1, Math.min(1000, Number(limit) || 200));
+  const rows = await pool
+    .query(
+      `
+      select
+        n.id, n.rule_id, r.rule_key, n.event_type, n.aggregate_type, n.aggregate_id, n.title, n.message, n.priority, n.status, n.ack_required,
+        n.audience, n.channels, n.payload, n.correlation_id, n.created_by, n.created_at, n.updated_at, n.sla_due_at,
+        n.acknowledged_at, n.acknowledged_by, n.escalated_at, n.escalation_level, n.resolved_at, n.resolved_by
+      from notification_message n
+      left join notification_rule r on r.id = n.rule_id
+      where ($1::text is null or n.status = $1)
+        and ($2::boolean = true or n.status <> 'acknowledged')
+        and ($3::text is null or n.aggregate_type = $3)
+        and ($4::text is null or n.aggregate_id = $4)
+      order by n.created_at desc, n.id desc
+      limit $5;
+      `,
+      [st, includeAcknowledged === true, aggType, aggId, n],
+    )
+    .then((r) => r.rows)
+    .catch(() => []);
+  return rows
+    .map((row) => ({
+      id: row.id,
+      ruleId: row.rule_id || null,
+      ruleKey: row.rule_key || null,
+      eventType: row.event_type,
+      aggregateType: row.aggregate_type,
+      aggregateId: row.aggregate_id,
+      title: row.title,
+      message: row.message,
+      priority: row.priority,
+      status: row.status,
+      ackRequired: Boolean(row.ack_required),
+      audience: row.audience || {},
+      channels: Array.isArray(row.channels) ? row.channels : [],
+      payload: row.payload || {},
+      correlationId: row.correlation_id || null,
+      createdBy: row.created_by,
+      createdAt: new Date(row.created_at).toISOString(),
+      updatedAt: new Date(row.updated_at).toISOString(),
+      slaDueAt: row.sla_due_at ? new Date(row.sla_due_at).toISOString() : null,
+      acknowledgedAt: row.acknowledged_at ? new Date(row.acknowledged_at).toISOString() : null,
+      acknowledgedBy: row.acknowledged_by || null,
+      escalatedAt: row.escalated_at ? new Date(row.escalated_at).toISOString() : null,
+      escalationLevel: Number(row.escalation_level) || 0,
+      resolvedAt: row.resolved_at ? new Date(row.resolved_at).toISOString() : null,
+      resolvedBy: row.resolved_by || null,
+    }))
+    .filter((item) => !auth || canViewNotificationMessage({ auth, item }));
+}
+
+async function listNotificationDeliveries({ auth = null, notificationId = null, channel = null, limit = 500 } = {}) {
+  if (!pool) return [];
+  const nid = normalizeString(notificationId) || null;
+  const ch = normalizeNotificationChannel(channel || "") || null;
+  const n = Math.max(1, Math.min(2000, Number(limit) || 500));
+  const rows = await pool
+    .query(
+      `
+      select d.id, d.notification_id, d.channel, d.status, d.provider, d.recipient, d.attempt_no, d.requested_at, d.processed_at, d.delivered_at, d.error_code, d.error_message, d.latency_ms, d.meta
+      from notification_delivery d
+      where ($1::text is null or d.notification_id = $1)
+        and ($2::text is null or d.channel = $2)
+      order by d.requested_at desc, d.id desc
+      limit $3;
+      `,
+      [nid, ch, n],
+    )
+    .then((r) => r.rows)
+    .catch(() => []);
+  const out = [];
+  for (const row of rows) {
+    const item = await getNotificationMessageById(row.notification_id);
+    if (!item || (auth && !canViewNotificationMessage({ auth, item }))) continue;
+    out.push({
+      id: row.id,
+      notificationId: row.notification_id,
+      channel: row.channel,
+      status: row.status,
+      provider: row.provider,
+      recipient: row.recipient || null,
+      attemptNo: Number(row.attempt_no) || 1,
+      requestedAt: new Date(row.requested_at).toISOString(),
+      processedAt: row.processed_at ? new Date(row.processed_at).toISOString() : null,
+      deliveredAt: row.delivered_at ? new Date(row.delivered_at).toISOString() : null,
+      errorCode: row.error_code || null,
+      errorMessage: row.error_message || null,
+      latencyMs: row.latency_ms === null ? null : Number(row.latency_ms),
+      meta: row.meta || {},
+    });
+  }
+  return out;
+}
+
+async function listNotificationEscalations({ auth = null, notificationId = null, limit = 500 } = {}) {
+  if (!pool) return [];
+  const nid = normalizeString(notificationId) || null;
+  const n = Math.max(1, Math.min(2000, Number(limit) || 500));
+  const rows = await pool
+    .query(
+      `
+      select id, notification_id, level_no, status, trigger_at, triggered_at, action, created_at
+      from notification_escalation
+      where ($1::text is null or notification_id = $1)
+      order by trigger_at asc, id asc
+      limit $2;
+      `,
+      [nid, n],
+    )
+    .then((r) => r.rows)
+    .catch(() => []);
+  const out = [];
+  for (const row of rows) {
+    const item = await getNotificationMessageById(row.notification_id);
+    if (!item || (auth && !canViewNotificationMessage({ auth, item }))) continue;
+    out.push({
+      id: row.id,
+      notificationId: row.notification_id,
+      levelNo: Number(row.level_no) || 1,
+      status: row.status,
+      triggerAt: new Date(row.trigger_at).toISOString(),
+      triggeredAt: row.triggered_at ? new Date(row.triggered_at).toISOString() : null,
+      action: row.action || {},
+      createdAt: new Date(row.created_at).toISOString(),
+    });
+  }
+  return out;
+}
+
+async function listNotificationAuditTrail({ auth = null, notificationId, limit = 500 } = {}) {
+  if (!pool) return [];
+  const nid = normalizeString(notificationId);
+  if (!nid) return [];
+  const item = await getNotificationMessageById(nid);
+  if (!item || (auth && !canViewNotificationMessage({ auth, item }))) return [];
+  const n = Math.max(1, Math.min(2000, Number(limit) || 500));
+  const rows = await pool
+    .query(
+      `
+      select id, notification_id, event_type, actor, occurred_at, meta
+      from notification_audit
+      where notification_id = $1
+      order by occurred_at asc, id asc
+      limit $2;
+      `,
+      [nid, n],
+    )
+    .then((r) => r.rows)
+    .catch(() => []);
+  return rows.map((r) => ({
+    id: r.id,
+    notificationId: r.notification_id,
+    eventType: r.event_type,
+    actor: r.actor,
+    occurredAt: new Date(r.occurred_at).toISOString(),
+    meta: r.meta || {},
+  }));
+}
+
+async function enqueueNotificationDispatch({ notificationId, requestedBy = "system" }) {
+  const id = normalizeString(notificationId);
+  if (!id) return { ok: false, error: "notificationId_required" };
+  return await createJob({ type: "notification_dispatch", requestedBy, params: { notificationId: id } });
+}
+
+async function createNotificationDeliveryRows({ notificationId, channels, audience, source = "base", levelNo = 0 }) {
+  if (!pool) return { ok: false, error: "db_required" };
+  const chs = normalizeNotificationChannels(channels, ["in_app"]);
+  const aud = normalizeAudience(audience);
+  for (const channel of chs) {
+    const cfg = await pool
+      .query(`select channel, enabled, provider, config from notification_channel_config where channel = $1 limit 1;`, [channel])
+      .then((r) => r.rows[0] || null)
+      .catch(() => null);
+    const provider = cfg ? cfg.provider : channel === "in_app" ? "in_app" : "log";
+    const enabled = cfg ? cfg.enabled === true : true;
+    await pool.query(
+      `
+      insert into notification_delivery
+        (id, notification_id, channel, status, provider, recipient, attempt_no, requested_at, processed_at, delivered_at, error_code, error_message, latency_ms, meta)
+      values
+        ($1,$2,$3,$4,$5,$6,1,$7,null,null,null,null,null,$8::jsonb);
+      `,
+      [
+        `nd_${crypto.randomUUID().slice(0, 18)}`,
+        notificationId,
+        channel,
+        enabled ? "queued" : "skipped",
+        provider,
+        audienceSummary(aud),
+        new Date().toISOString(),
+        JSON.stringify({ source, levelNo, audience: aud, enabled }),
+      ],
+    );
+  }
+  return { ok: true };
+}
+
+async function createNotificationMessage({
+  ruleKey = null,
+  eventType,
+  aggregateType,
+  aggregateId,
+  title,
+  message,
+  priority = null,
+  channels = null,
+  audience = null,
+  payload = {},
+  ackRequired = null,
+  slaMinutes = null,
+  slaDueAt = null,
+  escalationPolicy = null,
+  correlationId = null,
+  createdBy = "system",
+} = {}) {
+  if (!pool) return { ok: false, error: "db_required" };
+  const ev = normalizeString(eventType);
+  const aggType = normalizeString(aggregateType);
+  const aggId = normalizeString(aggregateId);
+  const ttl = normalizeString(title);
+  const msg = normalizeString(message);
+  if (!ev) return { ok: false, error: "eventType_required" };
+  if (!aggType) return { ok: false, error: "aggregateType_required" };
+  if (!aggId) return { ok: false, error: "aggregateId_required" };
+  if (!ttl) return { ok: false, error: "title_required" };
+  if (!msg) return { ok: false, error: "message_required" };
+  const rule = ruleKey ? await getNotificationRuleByKey(ruleKey) : null;
+  const effectiveChannels = normalizeNotificationChannels(channels || rule?.channels || ["in_app"]);
+  const effectiveAudience = mergeAudience(rule?.audience || {}, audience || {});
+  const effectivePriority = normalizeNotificationPriority(priority || rule?.priority || "medium");
+  const effectiveAckRequired = ackRequired === null || ackRequired === undefined ? rule?.ackRequired === true : ackRequired === true;
+  const effectiveSlaMinutes = Math.max(1, Math.floor(Number(slaMinutes === null || slaMinutes === undefined ? rule?.slaMinutes || 60 : slaMinutes) || 60));
+  const effectiveEscalationPolicy = normalizeEscalationPolicy(escalationPolicy || rule?.escalationPolicy || []);
+  const now = new Date();
+  const due = slaDueAt ? parseIsoDate(slaDueAt) : new Date(now.getTime() + effectiveSlaMinutes * 60_000);
+  if (!due) return { ok: false, error: "slaDueAt_invalid" };
+  const id = `ntf_${crypto.randomUUID().slice(0, 18)}`;
+  await pool.query(
+    `
+    insert into notification_message
+      (id, rule_id, event_type, aggregate_type, aggregate_id, title, message, priority, status, ack_required, audience, channels, payload, correlation_id, created_by, created_at, updated_at, sla_due_at, acknowledged_at, acknowledged_by, escalated_at, escalation_level, resolved_at, resolved_by)
+    values
+      ($1,$2,$3,$4,$5,$6,$7,$8,'queued',$9,$10::jsonb,$11::text[],$12::jsonb,$13,$14,$15,$15,$16,null,null,null,0,null,null);
+    `,
+    [id, rule?.id || null, ev, aggType, aggId, ttl, msg, effectivePriority, effectiveAckRequired, JSON.stringify(effectiveAudience), effectiveChannels, JSON.stringify(payload && typeof payload === "object" ? payload : {}), normalizeString(correlationId) || null, normalizeString(createdBy) || "system", now.toISOString(), due.toISOString()],
+  );
+  await appendNotificationAudit({ notificationId: id, eventType: "NOTIFICATION_CREATED", actor: createdBy || "system", occurredAt: now.toISOString(), meta: { eventType: ev, aggregateType: aggType, aggregateId: aggId, channels: effectiveChannels, audience: effectiveAudience, ruleKey: rule?.ruleKey || ruleKey || null } });
+  await createNotificationDeliveryRows({ notificationId: id, channels: effectiveChannels, audience: effectiveAudience, source: "base", levelNo: 0 });
+  for (const esc of effectiveEscalationPolicy) {
+    await pool.query(
+      `
+      insert into notification_escalation (id, notification_id, level_no, status, trigger_at, triggered_at, action, created_at)
+      values ($1,$2,$3,'pending',$4,null,$5::jsonb,$6);
+      `,
+      [
+        `nes_${crypto.randomUUID().slice(0, 18)}`,
+        id,
+        esc.level,
+        new Date(now.getTime() + esc.afterMinutes * 60_000).toISOString(),
+        JSON.stringify({ channels: esc.channels, audience: esc.audience, afterMinutes: esc.afterMinutes, meta: esc.meta || {} }),
+        now.toISOString(),
+      ],
+    );
+  }
+  await enqueueNotificationDispatch({ notificationId: id, requestedBy: normalizeString(createdBy) || "system" }).catch(() => null);
+  await publishErpEvent({
+    eventType: "NOTIFICATION_CREATED",
+    aggregateType: "notification",
+    aggregateId: id,
+    createdBy: normalizeString(createdBy) || "system",
+    payload: { eventType: ev, sourceAggregateType: aggType, sourceAggregateId: aggId, priority: effectivePriority, channels: effectiveChannels },
+  }).catch(() => null);
+  return { ok: true, item: await getNotificationMessageById(id) };
+}
+
+async function resolveNotificationsByAggregate({ aggregateType, aggregateId, actor = "system", status = "resolved" } = {}) {
+  if (!pool) return { ok: false, error: "db_required" };
+  const aggType = normalizeString(aggregateType);
+  const aggId = normalizeString(aggregateId);
+  const st = normalizeNotificationStatus(status);
+  if (!aggType || !aggId) return { ok: false, error: "aggregate_required" };
+  const now = new Date().toISOString();
+  const rows = await pool
+    .query(
+      `
+      update notification_message
+      set status = $3,
+          resolved_at = case when $3 = 'resolved' then $4::timestamptz else resolved_at end,
+          resolved_by = case when $3 = 'resolved' then $5 else resolved_by end,
+          updated_at = $4::timestamptz
+      where aggregate_type = $1
+        and aggregate_id = $2
+        and status not in ('resolved','cancelled')
+      returning id;
+      `,
+      [aggType, aggId, st, now, normalizeString(actor) || "system"],
+    )
+    .then((r) => r.rows)
+    .catch(() => []);
+  for (const row of rows) {
+    await pool.query(`update notification_escalation set status = 'cancelled' where notification_id = $1 and status = 'pending';`, [row.id]).catch(() => {});
+    await appendNotificationAudit({ notificationId: row.id, eventType: "NOTIFICATION_RESOLVED", actor: actor || "system", occurredAt: now, meta: { aggregateType: aggType, aggregateId: aggId, status: st } });
+  }
+  return { ok: true, count: rows.length };
+}
+
+async function acknowledgeNotification({ notificationId, auth, note = null }) {
+  if (!pool) return { ok: false, error: "db_required" };
+  const id = normalizeString(notificationId);
+  if (!id) return { ok: false, error: "notificationId_required" };
+  const item = await getNotificationMessageById(id);
+  if (!item) return { ok: false, error: "notification_not_found" };
+  if (!canViewNotificationMessage({ auth, item })) return { ok: false, error: "forbidden" };
+  const actor = normalizeString(auth && auth.username);
+  if (!actor) return { ok: false, error: "username_required" };
+  const now = new Date().toISOString();
+  await pool.query(
+    `
+    update notification_message
+    set status = 'acknowledged',
+        acknowledged_at = $2,
+        acknowledged_by = $3,
+        updated_at = $2
+    where id = $1;
+    `,
+    [id, now, actor],
+  );
+  await pool.query(`update notification_escalation set status = 'cancelled' where notification_id = $1 and status = 'pending';`, [id]).catch(() => {});
+  await appendNotificationAudit({ notificationId: id, eventType: "NOTIFICATION_ACKNOWLEDGED", actor, occurredAt: now, meta: note ? { note } : {} });
+  await publishErpEvent({
+    eventType: "NOTIFICATION_ACKNOWLEDGED",
+    aggregateType: "notification",
+    aggregateId: id,
+    occurredAt: now,
+    createdBy: actor,
+    payload: note ? { note } : {},
+  }).catch(() => null);
+  return { ok: true, item: await getNotificationMessageById(id) };
+}
+
+async function updateNotificationMessageStatusFromDeliveries(notificationId) {
+  if (!pool) return;
+  const rows = await pool
+    .query(`select status from notification_delivery where notification_id = $1;`, [notificationId])
+    .then((r) => r.rows)
+    .catch(() => []);
+  const states = rows.map((r) => r.status);
+  const nextStatus = states.some((x) => x === "queued")
+    ? "queued"
+    : states.some((x) => x === "delivered")
+      ? "delivered"
+      : states.some((x) => x === "failed")
+        ? "dispatched"
+        : "dispatched";
+  await pool.query(`update notification_message set status = $2, updated_at = now() where id = $1 and status in ('queued','dispatched','delivered');`, [notificationId, nextStatus]).catch(() => {});
+}
+
+async function deliverNotificationDelivery({ notification, delivery, workerId = null }) {
+  const cfg = await pool
+    .query(`select channel, enabled, provider, config, quality_standard from notification_channel_config where channel = $1 limit 1;`, [delivery.channel])
+    .then((r) => r.rows[0] || null)
+    .catch(() => null);
+  const provider = cfg?.provider || delivery.provider || "log";
+  const config = cfg?.config && typeof cfg.config === "object" ? cfg.config : {};
+  const requestedAt = new Date(delivery.requestedAt);
+  const started = Date.now();
+
+  if (cfg && cfg.enabled !== true) {
+    await pool.query(
+      `update notification_delivery set status = 'skipped', processed_at = now(), error_code = 'channel_disabled', error_message = null, meta = jsonb_set(meta, '{workerId}', to_jsonb($2::text), true) where id = $1;`,
+      [delivery.id, workerId || ""],
+    );
+    return { ok: true, status: "skipped" };
   }
 
-  if (method === "GET" && url.pathname === "/api/healthz") {
-    return json(res, 200, { ok: true, service: "api", ts: new Date().toISOString() });
+  if (delivery.channel === "in_app" || provider === "in_app") {
+    const deliveredAt = new Date().toISOString();
+    const latencyMs = Math.max(0, Date.now() - requestedAt.getTime());
+    await pool.query(
+      `
+      update notification_delivery
+      set status = 'delivered',
+          processed_at = $2,
+          delivered_at = $2,
+          latency_ms = $3,
+          meta = meta || $4::jsonb
+      where id = $1;
+      `,
+      [delivery.id, deliveredAt, latencyMs, JSON.stringify({ deliveryMode: "stored", workerId: workerId || null })],
+    );
+    return { ok: true, status: "delivered" };
   }
+
+  if (provider === "http") {
+    const endpointUrl = normalizeString(config.endpointUrl || config.url || "");
+    if (!endpointUrl) {
+      await pool.query(`update notification_delivery set status = 'failed', processed_at = now(), error_code = 'endpoint_missing', error_message = 'endpointUrl_required' where id = $1;`, [delivery.id]);
+      return { ok: false, error: "endpoint_missing" };
+    }
+    const timeoutMs = Math.max(1000, Math.min(60_000, Number(config.timeoutMs) || 15_000));
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetch(endpointUrl, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          ...(normalizeString(config.authBearer) ? { authorization: `Bearer ${normalizeString(config.authBearer)}` } : {}),
+        },
+        body: JSON.stringify({ notification, delivery }),
+        signal: controller.signal,
+      });
+      const text = await res.text().catch(() => "");
+      if (!res.ok) throw new Error(`http_${res.status}${text ? `:${text.slice(0, 300)}` : ""}`);
+      const deliveredAt = new Date().toISOString();
+      const latencyMs = Math.max(0, Date.now() - requestedAt.getTime());
+      await pool.query(
+        `
+        update notification_delivery
+        set status = 'delivered',
+            processed_at = $2,
+            delivered_at = $2,
+            latency_ms = $3,
+            meta = meta || $4::jsonb
+        where id = $1;
+        `,
+        [delivery.id, deliveredAt, latencyMs, JSON.stringify({ deliveryMode: "http", workerId: workerId || null, provider, endpointUrl })],
+      );
+      clearTimeout(timeout);
+      return { ok: true, status: "delivered" };
+    } catch (e) {
+      clearTimeout(timeout);
+      const msg = e && e.name === "AbortError" ? "timeout" : String(e && e.message ? e.message : e);
+      await pool.query(
+        `
+        update notification_delivery
+        set status = 'failed',
+            processed_at = now(),
+            error_code = 'delivery_failed',
+            error_message = $2,
+            meta = meta || $3::jsonb
+        where id = $1;
+        `,
+        [delivery.id, msg.slice(0, 2000), JSON.stringify({ deliveryMode: "http", workerId: workerId || null, provider })],
+      );
+      return { ok: false, error: msg };
+    }
+  }
+
+  const deliveredAt = new Date().toISOString();
+  const latencyMs = Math.max(0, Date.now() - Math.min(started, requestedAt.getTime()));
+  await pool.query(
+    `
+    update notification_delivery
+    set status = 'delivered',
+        processed_at = $2,
+        delivered_at = $2,
+        latency_ms = $3,
+        meta = meta || $4::jsonb
+    where id = $1;
+    `,
+    [delivery.id, deliveredAt, latencyMs, JSON.stringify({ deliveryMode: "log", workerId: workerId || null, provider, config })],
+  );
+  return { ok: true, status: "delivered" };
+}
+
+async function runNotificationDispatchJob({ job, workerId = null }) {
+  if (!pool) throw new Error("db_required");
+  const notificationId = normalizeString(job.params && job.params.notificationId);
+  if (!notificationId) throw new Error("notificationId_required");
+  const notification = await getNotificationMessageById(notificationId);
+  if (!notification) throw new Error("notification_not_found");
+  const rows = await pool
+    .query(
+      `
+      select id, channel, status, provider, recipient, attempt_no, requested_at, processed_at, delivered_at, error_code, error_message, latency_ms, meta
+      from notification_delivery
+      where notification_id = $1 and status = 'queued'
+      order by requested_at asc, id asc;
+      `,
+      [notificationId],
+    )
+    .then((r) => r.rows)
+    .catch(() => []);
+  let delivered = 0;
+  let failed = 0;
+  let skipped = 0;
+  for (const row of rows) {
+    const delivery = {
+      id: row.id,
+      channel: row.channel,
+      status: row.status,
+      provider: row.provider,
+      recipient: row.recipient || null,
+      attemptNo: Number(row.attempt_no) || 1,
+      requestedAt: new Date(row.requested_at).toISOString(),
+      meta: row.meta || {},
+    };
+    const r = await deliverNotificationDelivery({ notification, delivery, workerId });
+    if (r.status === "delivered") delivered += 1;
+    else if (r.status === "skipped") skipped += 1;
+    else failed += 1;
+  }
+  await updateNotificationMessageStatusFromDeliveries(notificationId);
+  await appendNotificationAudit({ notificationId, eventType: "NOTIFICATION_DISPATCHED", actor: workerId || "worker", meta: { delivered, failed, skipped } });
+  return { notificationId, delivered, failed, skipped };
+}
+
+async function tickNotificationCenter() {
+  if (!pool) return { ok: true, escalated: 0, breached: 0 };
+  const now = new Date();
+  const escalations = await pool
+    .query(
+      `
+      select e.id, e.notification_id, e.level_no, e.action
+      from notification_escalation e
+      join notification_message n on n.id = e.notification_id
+      where e.status = 'pending'
+        and e.trigger_at <= $1
+        and n.status not in ('acknowledged','resolved','cancelled')
+      order by e.trigger_at asc
+      limit 100;
+      `,
+      [now.toISOString()],
+    )
+    .then((r) => r.rows)
+    .catch(() => []);
+  let escalated = 0;
+  for (const row of escalations) {
+    const item = await getNotificationMessageById(row.notification_id);
+    if (!item || ["acknowledged", "resolved", "cancelled"].includes(item.status)) {
+      await pool.query(`update notification_escalation set status = 'cancelled' where id = $1;`, [row.id]).catch(() => {});
+      continue;
+    }
+    const action = row.action && typeof row.action === "object" ? row.action : {};
+    const escAudience = mergeAudience(item.audience || {}, action.audience || {});
+    const escChannels = normalizeNotificationChannels(action.channels || item.channels || ["in_app"]);
+    await pool.query(`update notification_escalation set status = 'triggered', triggered_at = $2 where id = $1;`, [row.id, now.toISOString()]);
+    await pool.query(
+      `
+      update notification_message
+      set status = case when status = 'breached' then status else 'escalated' end,
+          audience = $4::jsonb,
+          escalation_level = greatest(escalation_level, $2),
+          escalated_at = $3,
+          updated_at = $3
+      where id = $1;
+      `,
+      [item.id, Number(row.level_no) || 1, now.toISOString(), JSON.stringify(escAudience)],
+    );
+    await createNotificationDeliveryRows({ notificationId: item.id, channels: escChannels, audience: escAudience, source: "escalation", levelNo: Number(row.level_no) || 1 });
+    await appendNotificationAudit({ notificationId: item.id, eventType: "ESCALATION_TRIGGERED", actor: "system", occurredAt: now.toISOString(), meta: { levelNo: Number(row.level_no) || 1, channels: escChannels, audience: escAudience } });
+    await enqueueNotificationDispatch({ notificationId: item.id, requestedBy: "system" }).catch(() => null);
+    escalated += 1;
+  }
+
+  const breachRows = await pool
+    .query(
+      `
+      select id
+      from notification_message
+      where status in ('queued','dispatched','delivered','escalated')
+        and ack_required = true
+        and acknowledged_at is null
+        and sla_due_at is not null
+        and sla_due_at <= $1
+      order by sla_due_at asc
+      limit 100;
+      `,
+      [now.toISOString()],
+    )
+    .then((r) => r.rows)
+    .catch(() => []);
+  let breached = 0;
+  for (const row of breachRows) {
+    await pool.query(`update notification_message set status = 'breached', updated_at = $2 where id = $1 and status <> 'breached';`, [row.id, now.toISOString()]).catch(() => {});
+    await appendNotificationAudit({ notificationId: row.id, eventType: "SLA_BREACHED", actor: "system", occurredAt: now.toISOString(), meta: {} });
+    breached += 1;
+  }
+  return { ok: true, escalated, breached };
+}
+
+async function computeNotificationQuality({ days = 7 } = {}) {
+  if (!pool) return { windowDays: days, channels: [] };
+  const d = Math.max(1, Math.min(365, Number(days) || 7));
+  const channels = await listNotificationChannelConfigs();
+  const rows = await pool
+    .query(
+      `
+      select channel, status, latency_ms
+      from notification_delivery
+      where requested_at >= now() - ($1::int * interval '1 day');
+      `,
+      [d],
+    )
+    .then((r) => r.rows)
+    .catch(() => []);
+  return {
+    windowDays: d,
+    channels: channels.map((cfg) => {
+      const channelRows = rows.filter((r) => r.channel === cfg.channel);
+      const attempted = channelRows.length;
+      const delivered = channelRows.filter((r) => r.status === "delivered").length;
+      const targetDeliveryMs = Number(cfg.qualityStandard?.targetDeliveryMs) || null;
+      const onTime = targetDeliveryMs === null ? delivered : channelRows.filter((r) => r.status === "delivered" && Number(r.latency_ms) <= targetDeliveryMs).length;
+      return {
+        channel: cfg.channel,
+        standard: cfg.qualityStandard || {},
+        metrics: {
+          attempted,
+          delivered,
+          failed: channelRows.filter((r) => r.status === "failed").length,
+          skipped: channelRows.filter((r) => r.status === "skipped").length,
+          accuracyPct: attempted === 0 ? 100 : Number(((delivered / attempted) * 100).toFixed(2)),
+          onTimePct: delivered === 0 ? 100 : Number(((onTime / delivered) * 100).toFixed(2)),
+        },
+      };
+    }),
+  };
+}
+
+async function createNotificationFromRuleKey({ ruleKey, aggregateType, aggregateId, title, message, payload = {}, audience = {}, correlationId = null, createdBy = "system", slaDueAt = null } = {}) {
+  const rule = await getNotificationRuleByKey(ruleKey);
+  if (!rule || rule.active !== true) return { ok: false, error: "rule_not_found" };
+  return await createNotificationMessage({
+    ruleKey,
+    eventType: rule.eventType,
+    aggregateType: aggregateType || rule.aggregateType || "notification",
+    aggregateId,
+    title,
+    message,
+    payload,
+    audience,
+    correlationId,
+    createdBy,
+    slaDueAt,
+  });
+}
+
+let notificationCenterTimer = null;
+function startNotificationCenterScheduler() {
+  if (notificationCenterTimer) return;
+  notificationCenterTimer = setInterval(() => tickNotificationCenter().catch(() => {}), 60_000);
+}
+
+const tracer = otelTrace.getTracer(process.env.OTEL_SERVICE_NAME || process.env.ERP_SERVICE_NAME || "ahlert-erp-api");
+
+const server = http.createServer((req, res) => {
+  void tracer.startActiveSpan("http.request", { kind: SpanKind.SERVER }, async (span) => {
+    const method = req.method || "GET";
+    const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
+    const originalPathname = url.pathname;
+    const requestId = `req_${crypto.randomUUID().slice(0, 12)}`;
+    const startedMs = Date.now();
+
+    try {
+      const sc = span.spanContext ? span.spanContext() : null;
+      const traceId = sc && typeof sc.traceId === "string" && !/^0+$/.test(sc.traceId) ? sc.traceId : null;
+      const spanId = sc && typeof sc.spanId === "string" ? sc.spanId : null;
+
+      res.__traceId = traceId;
+      res.__spanId = spanId;
+      res.setHeader("x-request-id", requestId);
+      if (traceId) res.setHeader("x-trace-id", traceId);
+      if (spanId) res.setHeader("x-span-id", spanId);
+
+      const apiVersionContext = parseApiVersionContext(originalPathname);
+      if (!apiVersionContext.ok && apiVersionContext.unsupported) {
+        res.__errorCode = "api_version_not_supported";
+        span.setStatus({ code: SpanStatusCode.ERROR });
+        return json(res, 400, { error: "bad_request", message: "api_version_not_supported", requestedVersion: apiVersionContext.requestedVersion });
+      }
+      if (originalPathname === "/api" || originalPathname.startsWith("/api/")) {
+        applyApiVersionHeaders(res, apiVersionContext);
+        url.pathname = apiVersionContext.routePath;
+      }
+      if (!enforceRateLimit({ req, res, method, path: url.pathname })) {
+        span.setStatus({ code: SpanStatusCode.ERROR });
+        span.end();
+        return;
+      }
+      const auth = getAuth(req);
+
+      span.setAttribute("http.method", method);
+      span.setAttribute("http.target", originalPathname);
+      span.setAttribute("service.name", process.env.OTEL_SERVICE_NAME || process.env.ERP_SERVICE_NAME || "ahlert-erp-api");
+      if (auth.username) span.setAttribute("enduser.id", auth.username);
+
+      res.on("finish", () => {
+        const ms = Date.now() - startedMs;
+        observeHttpRequest({ method, path: originalPathname, status: res.statusCode, ms });
+        logEvent("info", "http_request", {
+          requestId,
+          traceId: res.__traceId || null,
+          spanId: res.__spanId || null,
+          method,
+          path: originalPathname,
+          status: res.statusCode,
+          errorCode: res.statusCode >= 400 ? res.__errorCode || null : null,
+          errorMessage: res.statusCode >= 400 ? res.__errorMessage || null : null,
+          ms,
+          user: auth.username || null,
+          ip: req.socket && req.socket.remoteAddress ? String(req.socket.remoteAddress) : null,
+        });
+        span.setAttribute("http.status_code", res.statusCode);
+        span.setAttribute("ahlert.request_id", requestId);
+        span.setAttribute("ahlert.error_code", res.statusCode >= 400 ? res.__errorCode || "" : "");
+        span.setAttribute("ahlert.duration_ms", ms);
+        if (res.statusCode >= 500) span.setStatus({ code: SpanStatusCode.ERROR });
+        span.end();
+      });
+
+      const safeMethod = method === "GET" || method === "HEAD" || method === "OPTIONS";
+      if (!safeMethod && auth.mode === "cookie" && url.pathname !== "/api/auth/login") {
+        if (!requireCsrf(res, req)) {
+          res.__errorCode = res.__errorCode || "csrf_required";
+          span.setStatus({ code: SpanStatusCode.ERROR });
+          span.end();
+          return;
+        }
+      }
+
+      if (method === "GET" && url.pathname === "/api/healthz") {
+        return json(res, 200, { ok: true, service: "api", ts: new Date().toISOString() });
+      }
 
   if (method === "GET" && url.pathname === "/api/metrics") {
     const lines = [];
@@ -8947,6 +15156,16 @@ const server = http.createServer(async (req, res) => {
       const pathLabel = m[2];
       const statusLabel = m[3];
       lines.push(`ahlert_http_requests_total{method="${methodLabel}",path="${pathLabel}",status="${statusLabel}"} ${v}`);
+    }
+    lines.push(`# TYPE ahlert_http_request_duration_ms_bucket counter`);
+    for (const [k, v] of metrics.httpRequestMsBucket.entries()) {
+      const m = k.match(/^(\S+)\s+(\S+)\s+(\d+)\s+(\S+)$/);
+      if (!m) continue;
+      const methodLabel = m[1];
+      const pathLabel = m[2];
+      const statusLabel = m[3];
+      const leLabel = m[4];
+      lines.push(`ahlert_http_request_duration_ms_bucket{method="${methodLabel}",path="${pathLabel}",status="${statusLabel}",le="${leLabel}"} ${v}`);
     }
     lines.push(`# TYPE ahlert_http_request_duration_ms_sum counter`);
     for (const [k, v] of metrics.httpRequestMsSum.entries()) {
@@ -8966,8 +15185,55 @@ const server = http.createServer(async (req, res) => {
       const statusLabel = m[3];
       lines.push(`ahlert_http_request_duration_ms_count{method="${methodLabel}",path="${pathLabel}",status="${statusLabel}"} ${v}`);
     }
+    lines.push(`# TYPE ahlert_erp_events_published_total counter`);
+    for (const [k, v] of metrics.erpEventsPublishedTotal.entries()) {
+      lines.push(`ahlert_erp_events_published_total{event_type="${k}"} ${v}`);
+    }
     res.writeHead(200, { "content-type": "text/plain; version=0.0.4; charset=utf-8" });
     return res.end(lines.join("\n") + "\n");
+  }
+
+  if (method === "GET" && url.pathname === "/api/observability/simulate") {
+    if (!requireAnyPermission(res, auth, [Permissions.ViewAudit, Permissions.FleetAdmin])) return;
+    const scenario = normalizeString(url.searchParams.get("case")) || "flaky";
+    const force = normalizeString(url.searchParams.get("force")) === "1";
+    const sleepMs = Math.max(0, Math.min(30_000, Number(url.searchParams.get("sleepMs")) || 0));
+    if (sleepMs) await new Promise((r) => setTimeout(r, sleepMs));
+    if (scenario === "flaky") {
+      const pct = Math.max(0, Math.min(100, Number(url.searchParams.get("pct")) || 1));
+      const h = crypto.createHash("sha256").update(requestId).digest();
+      const roll = (h[0] / 255) * 100;
+      const fail = force || roll < pct;
+      if (fail) {
+        logEvent("error", "simulated_error", {
+          requestId,
+          traceId: res.__traceId || null,
+          spanId: res.__spanId || null,
+          errorCode: "simulated_failure",
+          errorMessage: "simulated_flaky_error",
+          scenario,
+        });
+        return json(res, 500, { error: "simulated_failure", message: "simulated_flaky_error", requestId });
+      }
+      return json(res, 200, { ok: true, scenario, requestId, traceId: res.__traceId || null });
+    }
+    return badRequest(res, "unsupported_scenario");
+  }
+
+  if (method === "POST" && url.pathname === "/api/observability/alertmanager-webhook") {
+    let body = null;
+    try {
+      body = await readJson(req);
+    } catch {
+      body = null;
+    }
+    logEvent("warn", "alertmanager_webhook", {
+      requestId,
+      traceId: res.__traceId || null,
+      spanId: res.__spanId || null,
+      alert: body || {},
+    });
+    return json(res, 200, { ok: true });
   }
 
   if (method === "GET" && url.pathname === "/api/auth/oidc/azure/start") {
@@ -9411,7 +15677,8 @@ const server = http.createServer(async (req, res) => {
       const row = await pool
         .query(
           `
-          select id, type, status, requested_by, params, progress, total, error, created_at, started_at, finished_at
+          select id, type, status, requested_by, params, progress, total, error, created_at, started_at, finished_at,
+                 priority, run_at, attempts, max_attempts, last_error, last_error_at, dead_lettered_at, dead_letter_reason
           from job
           where id = $1
           limit 1;
@@ -9430,6 +15697,14 @@ const server = http.createServer(async (req, res) => {
           progress: Number(row.progress) || 0,
           total: Number(row.total) || 100,
           error: row.error || null,
+          priority: Number(row.priority) || 0,
+          runAt: row.run_at ? new Date(row.run_at).toISOString() : null,
+          attempts: Number(row.attempts) || 0,
+          maxAttempts: Number(row.max_attempts) || 0,
+          lastError: row.last_error || null,
+          lastErrorAt: row.last_error_at ? new Date(row.last_error_at).toISOString() : null,
+          deadLetteredAt: row.dead_lettered_at ? new Date(row.dead_lettered_at).toISOString() : null,
+          deadLetterReason: row.dead_letter_reason || null,
           createdAt: new Date(row.created_at).toISOString(),
           startedAt: row.started_at ? new Date(row.started_at).toISOString() : null,
           finishedAt: row.finished_at ? new Date(row.finished_at).toISOString() : null,
@@ -9467,7 +15742,8 @@ const server = http.createServer(async (req, res) => {
     const rows = await pool
       .query(
         `
-        select id, type, status, requested_by, params, progress, total, error, created_at, started_at, finished_at
+        select id, type, status, requested_by, params, progress, total, error, created_at, started_at, finished_at,
+               priority, run_at, attempts, max_attempts, last_error, last_error_at, dead_lettered_at, dead_letter_reason
         from job
         ${whereSql}
         order by created_at desc, id desc
@@ -9491,6 +15767,14 @@ const server = http.createServer(async (req, res) => {
         progress: Number(row.progress) || 0,
         total: Number(row.total) || 100,
         error: row.error || null,
+        priority: Number(row.priority) || 0,
+        runAt: row.run_at ? new Date(row.run_at).toISOString() : null,
+        attempts: Number(row.attempts) || 0,
+        maxAttempts: Number(row.max_attempts) || 0,
+        lastError: row.last_error || null,
+        lastErrorAt: row.last_error_at ? new Date(row.last_error_at).toISOString() : null,
+        deadLetteredAt: row.dead_lettered_at ? new Date(row.dead_lettered_at).toISOString() : null,
+        deadLetterReason: row.dead_letter_reason || null,
         createdAt: new Date(row.created_at).toISOString(),
         startedAt: row.started_at ? new Date(row.started_at).toISOString() : null,
         finishedAt: row.finished_at ? new Date(row.finished_at).toISOString() : null,
@@ -9525,6 +15809,232 @@ const server = http.createServer(async (req, res) => {
         message: r.message,
         meta: r.meta || {},
         createdAt: new Date(r.created_at).toISOString(),
+      })),
+    });
+  }
+
+  if (method === "POST" && url.pathname === "/api/controlling/entries") {
+    if (!requireAnyPermission(res, auth, [Permissions.ControllingManage, Permissions.AuthAdmin])) return;
+    let body;
+    try {
+      body = await readJson(req);
+    } catch {
+      return badRequest(res, "invalid_json");
+    }
+    if (!body || typeof body !== "object") body = {};
+    const r = await createFinanceEntry({
+      entryType: body.entryType,
+      objectType: body.objectType,
+      objectId: body.objectId,
+      currency: body.currency || "EUR",
+      amountCents: body.amountCents,
+      occurredAt: body.occurredAt || null,
+      costCenter: body.costCenter || null,
+      account: body.account || null,
+      sourceModule: "controlling",
+      sourceRefType: "manual",
+      sourceRefId: body.sourceRefId || null,
+      meta: body.meta && typeof body.meta === "object" ? body.meta : {},
+      createdBy: auth.username,
+    });
+    if (!r.ok) return badRequest(res, r.error);
+    return json(res, 201, { ok: true, id: r.id });
+  }
+
+  if (method === "GET" && url.pathname === "/api/controlling/entries") {
+    if (!requireAnyPermission(res, auth, [Permissions.ControllingView, Permissions.ControllingManage, Permissions.ViewAudit, Permissions.AuthAdmin])) return;
+    const objectType = normalizeString(url.searchParams.get("objectType")) || null;
+    const objectId = normalizeString(url.searchParams.get("objectId")) || null;
+    const entryType = normalizeString(url.searchParams.get("entryType")) || null;
+    const costCenter = normalizeString(url.searchParams.get("costCenter")) || null;
+    const from = normalizeString(url.searchParams.get("from")) || null;
+    const to = normalizeString(url.searchParams.get("to")) || null;
+    const limitRaw = normalizeString(url.searchParams.get("limit"));
+    const limit = limitRaw ? Number(limitRaw) : 200;
+    const r = await listFinanceEntries({ objectType, objectId, entryType, costCenter, from, to, limit });
+    if (!r.ok) return badRequest(res, r.error);
+    return json(res, 200, { items: r.items });
+  }
+
+  if (method === "GET" && url.pathname === "/api/controlling/contribution") {
+    if (!requireAnyPermission(res, auth, [Permissions.ControllingView, Permissions.ControllingManage, Permissions.ViewAudit, Permissions.AuthAdmin])) return;
+    const objectType = normalizeString(url.searchParams.get("objectType"));
+    const objectId = normalizeString(url.searchParams.get("objectId"));
+    if (!objectType) return badRequest(res, "objectType_required");
+    if (!objectId) return badRequest(res, "objectId_required");
+    const from = normalizeString(url.searchParams.get("from")) || null;
+    const to = normalizeString(url.searchParams.get("to")) || null;
+    const r = await computeContribution({ objectType, objectId, from, to });
+    if (!r.ok) return badRequest(res, r.error);
+    return json(res, 200, { totals: r.totals });
+  }
+
+  if (method === "POST" && url.pathname === "/api/reporting/mart/refresh") {
+    if (!requireAnyPermission(res, auth, [Permissions.ReportingManage, Permissions.AuthAdmin])) return;
+    if (!pool) return badRequest(res, "db_required");
+    let body;
+    try {
+      body = await readJson(req);
+    } catch {
+      return badRequest(res, "invalid_json");
+    }
+    if (!body || typeof body !== "object") body = {};
+    const fromDay = normalizeDateOnly(body.fromDay) || null;
+    const toDay = normalizeDateOnly(body.toDay) || null;
+    const job = await createJob({ type: "reporting_mart_refresh", requestedBy: auth.username, params: { fromDay, toDay } });
+    if (!job.ok) return badRequest(res, job.error);
+    publishEvent("jobs", "job_created", { jobId: job.id, type: "reporting_mart_refresh", requestedBy: auth.username });
+    return json(res, 202, { ok: true, jobId: job.id });
+  }
+
+  if (method === "GET" && url.pathname === "/api/reporting/mart/finance/daily") {
+    if (!requireAnyPermission(res, auth, [Permissions.ReportingView, Permissions.ReportingManage, Permissions.ViewAudit, Permissions.AuthAdmin])) return;
+    if (!pool) return badRequest(res, "db_required");
+    const fromDay = normalizeDateOnly(url.searchParams.get("fromDay")) || null;
+    const toDay = normalizeDateOnly(url.searchParams.get("toDay")) || null;
+    const costCenter = normalizeString(url.searchParams.get("costCenter")) || null;
+    const currency = normalizeString(url.searchParams.get("currency")) || null;
+    const limitRaw = normalizeString(url.searchParams.get("limit"));
+    const limit = Math.max(1, Math.min(2000, limitRaw ? Number(limitRaw) : 500));
+    const where = [];
+    const params = [];
+    const add = (sql, val) => {
+      params.push(val);
+      where.push(sql.replace("?", `$${params.length}`));
+    };
+    if (fromDay) add("day >= ?::date", fromDay);
+    if (toDay) add("day <= ?::date", toDay);
+    if (costCenter) add("cost_center = ?", costCenter);
+    if (currency) add("currency = ?", currency);
+    const whereSql = where.length ? `where ${where.join(" and ")}` : "";
+    const rows = await pool
+      .query(
+        `
+        select day, currency, cost_center, revenue_cents, cost_cents, contribution_cents, last_refreshed_at
+        from rpt_finance_daily
+        ${whereSql}
+        order by day desc, currency asc, cost_center asc nulls first
+        limit ${limit};
+        `,
+        params,
+      )
+      .then((r) => r.rows)
+      .catch(() => []);
+    return json(res, 200, {
+      items: rows.map((r) => ({
+        day: String(r.day),
+        currency: r.currency,
+        costCenter: r.cost_center || null,
+        revenueCents: Number(r.revenue_cents) || 0,
+        costCents: Number(r.cost_cents) || 0,
+        contributionCents: Number(r.contribution_cents) || 0,
+        lastRefreshedAt: new Date(r.last_refreshed_at).toISOString(),
+      })),
+    });
+  }
+
+  if (method === "GET" && url.pathname === "/api/reporting/mart/waste/daily") {
+    if (!requireAnyPermission(res, auth, [Permissions.ReportingView, Permissions.ReportingManage, Permissions.ViewAudit, Permissions.AuthAdmin])) return;
+    if (!pool) return badRequest(res, "db_required");
+    const fromDay = normalizeDateOnly(url.searchParams.get("fromDay")) || null;
+    const toDay = normalizeDateOnly(url.searchParams.get("toDay")) || null;
+    const limitRaw = normalizeString(url.searchParams.get("limit"));
+    const limit = Math.max(1, Math.min(2000, limitRaw ? Number(limitRaw) : 500));
+    const where = [];
+    const params = [];
+    const add = (sql, val) => {
+      params.push(val);
+      where.push(sql.replace("?", `$${params.length}`));
+    };
+    if (fromDay) add("day >= ?::date", fromDay);
+    if (toDay) add("day <= ?::date", toDay);
+    const whereSql = where.length ? `where ${where.join(" and ")}` : "";
+    const rows = await pool
+      .query(
+        `
+        select day, orders_created, orders_invoiced, invoice_revenue_cents, planned_tons, last_refreshed_at
+        from rpt_waste_daily
+        ${whereSql}
+        order by day desc
+        limit ${limit};
+        `,
+        params,
+      )
+      .then((r) => r.rows)
+      .catch(() => []);
+    return json(res, 200, {
+      items: rows.map((r) => ({
+        day: String(r.day),
+        ordersCreated: Number(r.orders_created) || 0,
+        ordersInvoiced: Number(r.orders_invoiced) || 0,
+        invoiceRevenueCents: Number(r.invoice_revenue_cents) || 0,
+        plannedTons: Number(r.planned_tons) || 0,
+        lastRefreshedAt: new Date(r.last_refreshed_at).toISOString(),
+      })),
+    });
+  }
+
+  if (method === "GET" && url.pathname === "/api/reporting/mart/waste/orders") {
+    if (!requireAnyPermission(res, auth, [Permissions.ReportingView, Permissions.ReportingManage, Permissions.ViewAudit, Permissions.AuthAdmin])) return;
+    if (!pool) return badRequest(res, "db_required");
+    const status = normalizeString(url.searchParams.get("status")) || null;
+    const customerRefId = normalizeString(url.searchParams.get("customerRefId")) || null;
+    const fromUpdatedAtRaw = normalizeString(url.searchParams.get("fromUpdatedAt")) || null;
+    const toUpdatedAtRaw = normalizeString(url.searchParams.get("toUpdatedAt")) || null;
+    const fromUpdatedAt = fromUpdatedAtRaw ? parseIsoDate(fromUpdatedAtRaw) : null;
+    const toUpdatedAt = toUpdatedAtRaw ? parseIsoDate(toUpdatedAtRaw) : null;
+    if (fromUpdatedAtRaw && !fromUpdatedAt) return badRequest(res, "invalid_fromUpdatedAt");
+    if (toUpdatedAtRaw && !toUpdatedAt) return badRequest(res, "invalid_toUpdatedAt");
+    const limitRaw = normalizeString(url.searchParams.get("limit"));
+    const limit = Math.max(1, Math.min(1000, limitRaw ? Number(limitRaw) : 200));
+    const where = [];
+    const params = [];
+    const add = (sql, val) => {
+      params.push(val);
+      where.push(sql.replace("?", `$${params.length}`));
+    };
+    if (status) add("status = ?", status);
+    if (customerRefId) add("customer_ref_id = ?", customerRefId);
+    if (fromUpdatedAt) add("updated_at >= ?::timestamptz", fromUpdatedAt.toISOString());
+    if (toUpdatedAt) add("updated_at <= ?::timestamptz", toUpdatedAt.toISOString());
+    const whereSql = where.length ? `where ${where.join(" and ")}` : "";
+    const rows = await pool
+      .query(
+        `
+        select
+          order_id, customer_ref_id, contract_id, municipality_id, disposal_site_id, status, service_type, container_source_key, material_code,
+          planned_tons, planned_volume_cbm, created_at, updated_at,
+          invoice_draft_id, invoice_currency, invoice_total_cents, invoiced_at,
+          last_refreshed_at
+        from rpt_waste_order_fact
+        ${whereSql}
+        order by updated_at desc
+        limit ${limit};
+        `,
+        params,
+      )
+      .then((r) => r.rows)
+      .catch(() => []);
+    return json(res, 200, {
+      items: rows.map((r) => ({
+        orderId: r.order_id,
+        customerRefId: r.customer_ref_id || null,
+        contractId: r.contract_id || null,
+        municipalityId: r.municipality_id || null,
+        disposalSiteId: r.disposal_site_id || null,
+        status: r.status,
+        serviceType: r.service_type,
+        containerSourceKey: r.container_source_key,
+        materialCode: r.material_code || null,
+        plannedTons: r.planned_tons === null ? null : Number(r.planned_tons),
+        plannedVolumeCbm: r.planned_volume_cbm === null ? null : Number(r.planned_volume_cbm),
+        createdAt: new Date(r.created_at).toISOString(),
+        updatedAt: new Date(r.updated_at).toISOString(),
+        invoiceDraftId: r.invoice_draft_id || null,
+        invoiceCurrency: r.invoice_currency || null,
+        invoiceTotalCents: r.invoice_total_cents === null ? null : Number(r.invoice_total_cents),
+        invoicedAt: r.invoiced_at ? new Date(r.invoiced_at).toISOString() : null,
+        lastRefreshedAt: new Date(r.last_refreshed_at).toISOString(),
       })),
     });
   }
@@ -10605,6 +17115,606 @@ const server = http.createServer(async (req, res) => {
     return json(res, 201, { item: r });
   }
 
+  if (url.pathname === "/api/sewage/assets") {
+    if (!pool) return badRequest(res, "db_required");
+    if (method === "GET") {
+      if (!requireAnyPermission(res, auth, [Permissions.WasteRouteView, Permissions.WasteRoutePlan, Permissions.WasteRouteManage, Permissions.FleetAdmin, Permissions.ViewAudit])) return;
+      const id = normalizeString(url.searchParams.get("id"));
+      const assetType = normalizeString(url.searchParams.get("assetType")).toLowerCase() || null;
+      const limit = Math.max(1, Math.min(200, Number(url.searchParams.get("limit")) || 100));
+      const rows = await pool.query(`select id, asset_no, asset_type, name, municipality_id, status, geo_point, geo_line, meta, created_by, created_at, updated_at from sewage_asset where ($1::text is null or id = $1) and ($2::text is null or asset_type = $2) order by updated_at desc, id desc limit $3;`, [id || null, assetType, limit]).then((r) => r.rows).catch(() => []);
+      const items = rows.map((x) => ({ id: x.id, assetNo: x.asset_no, assetType: x.asset_type, name: x.name || null, municipalityId: x.municipality_id || null, status: x.status, geoPoint: x.geo_point || {}, geoLine: x.geo_line || {}, meta: x.meta || {}, createdBy: x.created_by || null, createdAt: new Date(x.created_at).toISOString(), updatedAt: new Date(x.updated_at).toISOString() }));
+      return json(res, 200, id ? { item: items[0] || null } : { items });
+    }
+    if (method === "POST") {
+      if (!requireAnyPermission(res, auth, [Permissions.WasteRoutePlan, Permissions.WasteRouteManage, Permissions.FleetAdmin])) return;
+      let body; try { body = await readJson(req); } catch { return badRequest(res, "invalid_json"); }
+      const assetNo = normalizeString(body?.assetNo); const assetType = normalizeString(body?.assetType).toLowerCase();
+      if (!assetNo) return badRequest(res, "assetNo_required");
+      if (!["haltung","schacht","hausanschluss","sonderbauwerk","abschnitt","zone"].includes(assetType)) return badRequest(res, "assetType_invalid");
+      const municipality = body?.municipalityId ? await getMunicipalityByIdOrCode(body.municipalityId) : null;
+      const id = normalizeString(body?.id) || `swa_${crypto.randomUUID().slice(0, 18)}`;
+      const status = ["active","inactive","archived"].includes(normalizeString(body?.status).toLowerCase()) ? normalizeString(body.status).toLowerCase() : "active";
+      await pool.query(`insert into sewage_asset (id, asset_no, asset_type, name, municipality_id, status, geo_point, geo_line, meta, created_by, created_at, updated_at) values ($1,$2,$3,$4,$5,$6,$7::jsonb,$8::jsonb,$9::jsonb,$10, now(), now()) on conflict (id) do update set asset_no = excluded.asset_no, asset_type = excluded.asset_type, name = excluded.name, municipality_id = excluded.municipality_id, status = excluded.status, geo_point = excluded.geo_point, geo_line = excluded.geo_line, meta = excluded.meta, updated_at = now();`, [id, assetNo, assetType, normalizeString(body?.name) || null, municipality ? municipality.id : null, status, JSON.stringify(body?.geoPoint || {}), JSON.stringify(body?.geoLine || {}), JSON.stringify(body?.meta || {}), auth.username || "system"]);
+      const item = await pool.query(`select id, asset_no, asset_type, name, municipality_id, status, geo_point, geo_line, meta, created_by, created_at, updated_at from sewage_asset where id = $1 limit 1;`, [id]).then((r) => r.rows[0] || null);
+      return json(res, 201, { item: { id: item.id, assetNo: item.asset_no, assetType: item.asset_type, name: item.name || null, municipalityId: item.municipality_id || null, status: item.status, geoPoint: item.geo_point || {}, geoLine: item.geo_line || {}, meta: item.meta || {} } });
+    }
+  }
+
+  if (url.pathname === "/api/sewage/orders") {
+    if (!pool) return badRequest(res, "db_required");
+    if (method === "GET") {
+      if (!requireAnyPermission(res, auth, [Permissions.WasteRouteView, Permissions.WasteRoutePlan, Permissions.WasteRouteManage, Permissions.FleetAdmin, Permissions.ViewAudit])) return;
+      const id = normalizeString(url.searchParams.get("id"));
+      const status = normalizeString(url.searchParams.get("status")).toLowerCase() || null;
+      const customer = normalizeString(url.searchParams.get("customerId"));
+      const customerRow = customer ? await getCustomerByIdOrNo(customer) : null;
+      const limit = Math.max(1, Math.min(200, Number(url.searchParams.get("limit")) || 100));
+      const rows = await pool.query(`select id, order_no, order_type, status, priority, customer_id, contract_id, municipality_id, title, description, requested_at, planned_start, planned_end, required_by, is_emergency, geo_point, geo_address, meta, created_by, created_at, updated_at from sewage_order where ($1::text is null or id = $1) and ($2::text is null or status = $2) and ($3::text is null or customer_id = $3) order by created_at desc, id desc limit $4;`, [id || null, status, customerRow ? customerRow.id : null, limit]).then((r) => r.rows).catch(() => []);
+      const items = rows.map((x) => ({ id: x.id, orderNo: x.order_no, orderType: x.order_type, status: x.status, priority: x.priority, customerId: x.customer_id, contractId: x.contract_id || null, municipalityId: x.municipality_id || null, title: x.title, description: x.description || null, requestedAt: new Date(x.requested_at).toISOString(), plannedStart: x.planned_start ? new Date(x.planned_start).toISOString() : null, plannedEnd: x.planned_end ? new Date(x.planned_end).toISOString() : null, requiredBy: x.required_by ? new Date(x.required_by).toISOString() : null, isEmergency: x.is_emergency === true, geoPoint: x.geo_point || {}, geoAddress: x.geo_address || null, meta: x.meta || {}, createdBy: x.created_by || null, createdAt: new Date(x.created_at).toISOString(), updatedAt: new Date(x.updated_at).toISOString() }));
+      return json(res, 200, id ? { item: items[0] || null } : { items });
+    }
+    if (method === "POST") {
+      if (!requireAnyPermission(res, auth, [Permissions.WasteRoutePlan, Permissions.WasteRouteManage, Permissions.FleetAdmin])) return;
+      let body; try { body = await readJson(req); } catch { return badRequest(res, "invalid_json"); }
+      const orderType = normalizeString(body?.orderType).toLowerCase(); const title = normalizeString(body?.title);
+      if (!["kanalreinigung","spuelung","tv_inspektion","dichtheitspruefung","notdienst","fraes_sonderarbeiten","sanierungsvorbereitung","nachkontrolle"].includes(orderType)) return badRequest(res, "orderType_invalid");
+      if (!title) return badRequest(res, "title_required");
+      const customer = await getCustomerByIdOrNo(body?.customerId); if (!customer) return badRequest(res, "customer_not_found");
+      const contract = body?.contractId ? await getContractById(body.contractId) : null; if (body?.contractId && !contract) return badRequest(res, "contract_not_found");
+      const municipality = body?.municipalityId ? await getMunicipalityByIdOrCode(body.municipalityId) : null;
+      const status = ["requested","planned","dispatched","in_progress","completed","approved","closed","cancelled"].includes(normalizeString(body?.status).toLowerCase()) ? normalizeString(body.status).toLowerCase() : "requested";
+      const priority = ["low","normal","high","critical"].includes(normalizeString(body?.priority).toLowerCase()) ? normalizeString(body.priority).toLowerCase() : "normal";
+      const id = normalizeString(body?.id) || `swo_${crypto.randomUUID().slice(0, 18)}`;
+      const orderNo = normalizeString(body?.orderNo) || `SEW-${new Date().toISOString().slice(0, 10).replace(/-/g, "")}-${crypto.randomUUID().slice(0, 6)}`;
+      await pool.query(`insert into sewage_order (id, order_no, order_type, status, priority, customer_id, contract_id, municipality_id, title, description, requested_at, planned_start, planned_end, required_by, is_emergency, geo_point, geo_address, meta, created_by, created_at, updated_at) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,coalesce($11::timestamptz, now()),$12::timestamptz,$13::timestamptz,$14::timestamptz,$15,$16::jsonb,$17,$18::jsonb,$19, now(), now());`, [id, orderNo, orderType, status, priority, customer.id, contract ? contract.id : null, municipality ? municipality.id : null, title, normalizeString(body?.description) || null, normalizeString(body?.requestedAt) || null, normalizeString(body?.plannedStart) || null, normalizeString(body?.plannedEnd) || null, normalizeString(body?.requiredBy) || null, body?.isEmergency === true, JSON.stringify(body?.geoPoint || {}), normalizeString(body?.geoAddress) || null, JSON.stringify(body?.meta || {}), auth.username || "system"]);
+      for (const ref of Array.isArray(body?.assetRefs) ? body.assetRefs : []) {
+        const assetId = normalizeString(ref?.assetId); if (!assetId) continue;
+        const found = await pool.query(`select id from sewage_asset where id = $1 limit 1;`, [assetId]).then((r) => r.rows[0] || null); if (!found) return badRequest(res, `asset_not_found:${assetId}`);
+        await pool.query(`insert into sewage_order_asset (id, order_id, asset_id, role, created_at) values ($1,$2,$3,$4, now()) on conflict do nothing;`, [`soa_${crypto.randomUUID().slice(0, 18)}`, id, assetId, ["primary","affected","inspection_target","followup_target"].includes(normalizeString(ref?.role)) ? normalizeString(ref.role) : "affected"]);
+      }
+      return json(res, 201, { item: { id, orderNo, orderType, status, priority, customerId: customer.id, contractId: contract ? contract.id : null, municipalityId: municipality ? municipality.id : null, title } });
+    }
+  }
+
+  if (method === "GET" && url.pathname === "/api/business-rules") {
+    if (!requireAnyPermission(res, auth, [Permissions.FleetAdmin, Permissions.AuthAdmin, Permissions.ViewAudit])) return;
+    if (!pool) return badRequest(res, "db_required");
+    const domain = normalizeString(url.searchParams.get("domain")) || null;
+    const activeOnly = normalizeString(url.searchParams.get("activeOnly")) === "true";
+    const limitRaw = normalizeString(url.searchParams.get("limit"));
+    const items = await listBusinessRules({ domain, activeOnly, limit: limitRaw ? Number(limitRaw) : 200 });
+    return json(res, 200, { items });
+  }
+
+  if (method === "POST" && url.pathname === "/api/business-rules") {
+    if (!requireAnyPermission(res, auth, [Permissions.FleetAdmin, Permissions.AuthAdmin])) return;
+    if (!pool) return badRequest(res, "db_required");
+    let body;
+    try {
+      body = await readJson(req);
+    } catch {
+      return badRequest(res, "invalid_json");
+    }
+    if (!body || typeof body !== "object") return badRequest(res, "missing_body");
+    const r = await upsertBusinessRule({
+      id: body.id || null,
+      ruleKey: body.ruleKey,
+      name: body.name,
+      domain: body.domain,
+      active: body.active !== false,
+      priority: body.priority,
+      stopOnMatch: body.stopOnMatch === true,
+      validFrom: body.validFrom || null,
+      validTo: body.validTo || null,
+      conditions: body.conditions && typeof body.conditions === "object" ? body.conditions : {},
+      actions: Array.isArray(body.actions) ? body.actions : [],
+      tags: Array.isArray(body.tags) ? body.tags : [],
+      meta: body.meta && typeof body.meta === "object" ? body.meta : {},
+      username: auth.username || "system",
+    });
+    if (!r.ok) return badRequest(res, r.error);
+    const items = await listBusinessRules({ domain: body.domain || null, limit: 200 });
+    return json(res, 200, { items });
+  }
+
+  if (method === "POST" && url.pathname === "/api/business-rules/evaluate") {
+    if (!requireAnyPermission(res, auth, [Permissions.FleetAdmin, Permissions.AuthAdmin, Permissions.ViewAudit, Permissions.PricingManage])) return;
+    if (!pool) return badRequest(res, "db_required");
+    let body;
+    try {
+      body = await readJson(req);
+    } catch {
+      return badRequest(res, "invalid_json");
+    }
+    if (!body || typeof body !== "object") return badRequest(res, "missing_body");
+    const domains = Array.isArray(body.domains) ? body.domains : [body.domain];
+    const r = await evaluateBusinessRuleDomains({
+      domains,
+      context: body.context && typeof body.context === "object" ? body.context : {},
+      atDate: normalizeString(body.atDate) || null,
+    });
+    return json(res, 200, r);
+  }
+
+  if (method === "GET" && url.pathname === "/api/portal/accounts") {
+    if (!requireAnyPermission(res, auth, [Permissions.FleetAdmin, Permissions.AuthAdmin, Permissions.ViewAudit])) return;
+    if (!pool) return badRequest(res, "db_required");
+    const portalType = normalizeString(url.searchParams.get("portalType")) || null;
+    const limitRaw = normalizeString(url.searchParams.get("limit"));
+    const items = await listPortalAccounts({ portalType, limit: limitRaw ? Number(limitRaw) : 100 });
+    return json(res, 200, { items: items.map((item) => ({ ...item, passwordHash: undefined })) });
+  }
+
+  if (method === "POST" && url.pathname === "/api/portal/accounts") {
+    if (!requireAnyPermission(res, auth, [Permissions.FleetAdmin, Permissions.AuthAdmin])) return;
+    if (!pool) return badRequest(res, "db_required");
+    let body;
+    try {
+      body = await readJson(req);
+    } catch {
+      return badRequest(res, "invalid_json");
+    }
+    if (!body || typeof body !== "object") return badRequest(res, "missing_body");
+    const r = await upsertPortalAccount({
+      id: body.id || null,
+      portalType: body.portalType,
+      displayName: body.displayName,
+      email: body.email,
+      password: body.password,
+      customerId: body.customerId || null,
+      supplierId: body.supplierId || null,
+      active: body.active !== false,
+      settings: body.settings && typeof body.settings === "object" ? body.settings : {},
+      username: auth.username || "system",
+    });
+    if (!r.ok) return badRequest(res, r.error);
+    return json(res, 201, { item: r.item ? { ...r.item, passwordHash: undefined } : null });
+  }
+
+  if (method === "POST" && url.pathname === "/api/portal/assignments") {
+    if (!requireAnyPermission(res, auth, [Permissions.FleetAdmin, Permissions.AuthAdmin, Permissions.WasteRouteManage, Permissions.WasteRoutePlan])) return;
+    if (!pool) return badRequest(res, "db_required");
+    let body;
+    try {
+      body = await readJson(req);
+    } catch {
+      return badRequest(res, "invalid_json");
+    }
+    if (!body || typeof body !== "object") return badRequest(res, "missing_body");
+    const r = await upsertPortalAssignment({
+      accountId: body.accountId,
+      scopeType: body.scopeType,
+      scopeId: body.scopeId,
+      accessLevel: body.accessLevel || "rw",
+      status: body.status || "active",
+      meta: body.meta && typeof body.meta === "object" ? body.meta : {},
+      username: auth.username || "system",
+    });
+    if (!r.ok) return badRequest(res, r.error);
+    return json(res, 200, { ok: true });
+  }
+
+  if (method === "POST" && url.pathname === "/api/portal/documents/link") {
+    if (!requireAnyPermission(res, auth, [Permissions.FleetAdmin, Permissions.AuthAdmin, Permissions.DocumentManage, Permissions.DocumentAdmin])) return;
+    if (!pool) return badRequest(res, "db_required");
+    let body;
+    try {
+      body = await readJson(req);
+    } catch {
+      return badRequest(res, "invalid_json");
+    }
+    if (!body || typeof body !== "object") return badRequest(res, "missing_body");
+    const r = await upsertPortalDocumentLink({
+      accountId: body.accountId,
+      documentId: body.documentId,
+      label: body.label || null,
+      meta: body.meta && typeof body.meta === "object" ? body.meta : {},
+      username: auth.username || "system",
+    });
+    if (!r.ok) return badRequest(res, r.error);
+    return json(res, 200, { ok: true });
+  }
+
+  if (method === "POST" && url.pathname === "/api/portal/login") {
+    if (!pool) return badRequest(res, "db_required");
+    let body;
+    try {
+      body = await readJson(req);
+    } catch {
+      return badRequest(res, "invalid_json");
+    }
+    if (!body || typeof body !== "object") return badRequest(res, "missing_body");
+    const email = normalizeString(body.email).toLowerCase();
+    const password = String(body.password || "");
+    if (!email) return badRequest(res, "email_required");
+    if (!password) return badRequest(res, "password_required");
+    const account = await getPortalAccountByEmail(email);
+    if (!account || !account.active) return unauthorized(res);
+    if (!verifyPortalPassword(password, account.passwordHash)) return unauthorized(res);
+    await touchPortalLogin(account.id);
+    await writePortalAudit({ accountId: account.id, action: "portal_login", actor: account.email, meta: { portalType: account.portalType } });
+    const accessToken = issuePortalAccessToken(account);
+    setCookie(res, "erp_portal_access", accessToken, { maxAgeSeconds: Math.max(60, Math.floor(accessTokenTtlSeconds)), path: "/", httpOnly: true, secure: cookieSecure, sameSite: cookieSameSite, domain: cookieDomain });
+    return json(res, 200, {
+      account: {
+        id: account.id,
+        portalType: account.portalType,
+        displayName: account.displayName,
+        email: account.email,
+        customerId: account.customerId || null,
+        supplierId: account.supplierId || null,
+      },
+      accessToken,
+    });
+  }
+
+  if (method === "POST" && url.pathname === "/api/portal/logout") {
+    clearCookie(res, "erp_portal_access");
+    return json(res, 200, { ok: true });
+  }
+
+  const portalAuth = getPortalAuth(req);
+
+  if (method === "GET" && url.pathname === "/api/portal/me") {
+    if (!requirePortal(res, portalAuth)) return;
+    const account = await getPortalAccountById(portalAuth.accountId);
+    if (!account || !account.active) return unauthorized(res);
+    return json(res, 200, { item: { ...account, passwordHash: undefined } });
+  }
+
+  if (method === "GET" && url.pathname === "/api/portal/dashboard") {
+    if (!requirePortal(res, portalAuth)) return;
+    const account = await getPortalAccountById(portalAuth.accountId);
+    if (!account || !account.active) return unauthorized(res);
+    return json(res, 200, await buildPortalDashboard(account));
+  }
+
+  if (method === "GET" && url.pathname === "/api/portal/orders") {
+    if (!requirePortal(res, portalAuth)) return;
+    const account = await getPortalAccountById(portalAuth.accountId);
+    if (!account || !account.active) return unauthorized(res);
+    const limitRaw = normalizeString(url.searchParams.get("limit"));
+    const items = await listPortalOrders({ account, limit: limitRaw ? Number(limitRaw) : 50 });
+    return json(res, 200, { items });
+  }
+
+  if (method === "POST" && url.pathname === "/api/portal/orders/status") {
+    if (!requirePortal(res, portalAuth, ["subcontractor"])) return;
+    const account = await getPortalAccountById(portalAuth.accountId);
+    if (!account || !account.active) return unauthorized(res);
+    let body;
+    try {
+      body = await readJson(req);
+    } catch {
+      return badRequest(res, "invalid_json");
+    }
+    if (!body || typeof body !== "object") return badRequest(res, "missing_body");
+    const orderId = normalizeString(body.orderId);
+    const toStatus = normalizeString(body.status);
+    if (!orderId) return badRequest(res, "orderId_required");
+    if (!["scheduled", "delivered", "pickup_requested", "picked_up"].includes(toStatus)) return badRequest(res, "status_invalid");
+    const assignments = await listPortalAssignments({ accountId: account.id, activeOnly: true });
+    const directOrder = assignments.some((x) => x.scopeType === "order" && x.scopeId === orderId);
+    let routeAssigned = false;
+    if (!directOrder) {
+      const routeIds = assignments.filter((x) => x.scopeType === "route").map((x) => x.scopeId);
+      if (routeIds.length) {
+        const row = await pool.query(`select 1 from waste_route_stop where route_id = any($1::text[]) and order_id = $2 limit 1;`, [routeIds, orderId]).then((r) => r.rows[0] || null).catch(() => null);
+        routeAssigned = Boolean(row);
+      }
+    }
+    if (!directOrder && !routeAssigned) return forbidden(res);
+    const r = await updateWasteOrderStatus({
+      orderId,
+      toStatus,
+      reason: "portal_update",
+      username: account.email,
+      meta: { portalAccountId: account.id, portalType: account.portalType },
+    });
+    if (!r.ok) return badRequest(res, r.error);
+    await writePortalAudit({ accountId: account.id, action: "portal_order_status_updated", actor: account.email, meta: { orderId, status: toStatus } });
+    return json(res, 200, { item: r.order });
+  }
+
+  if (method === "GET" && url.pathname === "/api/portal/contracts") {
+    if (!requirePortal(res, portalAuth, ["customer"])) return;
+    const account = await getPortalAccountById(portalAuth.accountId);
+    if (!account || !account.active) return unauthorized(res);
+    const status = normalizeString(url.searchParams.get("status")) || null;
+    const limitRaw = normalizeString(url.searchParams.get("limit"));
+    const items = await listContracts({ customerId: account.customerId, status, limit: limitRaw ? Number(limitRaw) : 50 });
+    return json(res, 200, { items });
+  }
+
+  if (method === "GET" && url.pathname === "/api/portal/routes") {
+    if (!requirePortal(res, portalAuth, ["subcontractor"])) return;
+    const account = await getPortalAccountById(portalAuth.accountId);
+    if (!account || !account.active) return unauthorized(res);
+    const limitRaw = normalizeString(url.searchParams.get("limit"));
+    const items = await listPortalRoutes({ accountId: account.id, limit: limitRaw ? Number(limitRaw) : 50 });
+    return json(res, 200, { items });
+  }
+
+  if (method === "GET" && url.pathname === "/api/portal/documents") {
+    if (!requirePortal(res, portalAuth)) return;
+    const account = await getPortalAccountById(portalAuth.accountId);
+    if (!account || !account.active) return unauthorized(res);
+    const limitRaw = normalizeString(url.searchParams.get("limit"));
+    const items = await listPortalDocuments({ accountId: account.id, limit: limitRaw ? Number(limitRaw) : 50 });
+    return json(res, 200, { items });
+  }
+
+  if (method === "GET" && url.pathname === "/api/portal/audit") {
+    if (!requirePortal(res, portalAuth)) return;
+    if (!pool) return badRequest(res, "db_required");
+    const rows = await pool
+      .query(
+        `
+        select id, action, actor, meta, occurred_at
+        from portal_audit
+        where account_id = $1
+        order by occurred_at desc
+        limit 100;
+        `,
+        [portalAuth.accountId],
+      )
+      .then((r) => r.rows)
+      .catch(() => []);
+    return json(res, 200, {
+      items: rows.map((row) => ({
+        id: row.id,
+        action: row.action,
+        actor: row.actor,
+        meta: row.meta || {},
+        occurredAt: new Date(row.occurred_at).toISOString(),
+      })),
+    });
+  }
+
+  if (method === "GET" && url.pathname === "/api/integrations/kinds") {
+    if (!requireAnyPermission(res, auth, [Permissions.FleetAdmin, Permissions.AuthAdmin, Permissions.ViewAudit])) return;
+    return json(res, 200, { items: ["datev", "dms", "telematics", "email", "sms", "portal", "custom"] });
+  }
+
+  if (method === "GET" && url.pathname === "/api/integrations/systems") {
+    if (!requireAnyPermission(res, auth, [Permissions.FleetAdmin, Permissions.AuthAdmin, Permissions.ViewAudit])) return;
+    if (!pool) return badRequest(res, "db_required");
+    const kind = normalizeString(url.searchParams.get("kind")) || null;
+    const status = normalizeString(url.searchParams.get("status")) || null;
+    const limitRaw = normalizeString(url.searchParams.get("limit"));
+    const items = await listIntegrationSystems({ kind, status, limit: limitRaw ? Number(limitRaw) : 200 });
+    return json(res, 200, { items });
+  }
+
+  if (method === "POST" && url.pathname === "/api/integrations/systems") {
+    if (!requireAnyPermission(res, auth, [Permissions.FleetAdmin, Permissions.AuthAdmin])) return;
+    if (!pool) return badRequest(res, "db_required");
+    let body;
+    try {
+      body = await readJson(req);
+    } catch {
+      return badRequest(res, "invalid_json");
+    }
+    if (!body || typeof body !== "object") return badRequest(res, "missing_body");
+    const r = await createIntegrationSystem({
+      kind: body.kind,
+      name: body.name,
+      status: body.status || "active",
+      config: body.config && typeof body.config === "object" ? body.config : {},
+      createdBy: auth.username || "system",
+    });
+    if (!r.ok) return badRequest(res, r.error);
+    const item = await getIntegrationSystemById(r.id);
+    return json(res, 201, { item });
+  }
+
+  if (method === "POST" && url.pathname === "/api/integrations/systems/update") {
+    if (!requireAnyPermission(res, auth, [Permissions.FleetAdmin, Permissions.AuthAdmin])) return;
+    if (!pool) return badRequest(res, "db_required");
+    let body;
+    try {
+      body = await readJson(req);
+    } catch {
+      return badRequest(res, "invalid_json");
+    }
+    if (!body || typeof body !== "object") return badRequest(res, "missing_body");
+    const r = await updateIntegrationSystem({
+      id: body.id,
+      name: body.name,
+      status: body.status,
+      config: body.config,
+    });
+    if (!r.ok) return badRequest(res, r.error);
+    const item = await getIntegrationSystemById(r.id);
+    if (!item) return notFound(res);
+    return json(res, 200, { item });
+  }
+
+  if (method === "GET" && url.pathname === "/api/integrations/subscriptions") {
+    if (!requireAnyPermission(res, auth, [Permissions.FleetAdmin, Permissions.AuthAdmin, Permissions.ViewAudit])) return;
+    if (!pool) return badRequest(res, "db_required");
+    const systemId = normalizeString(url.searchParams.get("systemId")) || null;
+    const activeOnly = normalizeString(url.searchParams.get("activeOnly")) === "true";
+    const limitRaw = normalizeString(url.searchParams.get("limit"));
+    const items = await listIntegrationSubscriptions({ systemId, activeOnly, limit: limitRaw ? Number(limitRaw) : 500 });
+    return json(res, 200, { items });
+  }
+
+  if (method === "POST" && url.pathname === "/api/integrations/subscriptions") {
+    if (!requireAnyPermission(res, auth, [Permissions.FleetAdmin, Permissions.AuthAdmin])) return;
+    if (!pool) return badRequest(res, "db_required");
+    let body;
+    try {
+      body = await readJson(req);
+    } catch {
+      return badRequest(res, "invalid_json");
+    }
+    if (!body || typeof body !== "object") return badRequest(res, "missing_body");
+    const r = await upsertIntegrationSubscription({
+      id: body.id || null,
+      systemId: body.systemId,
+      active: body.active !== false,
+      eventTypes: body.eventTypes,
+      aggregateType: body.aggregateType || null,
+      createdBy: auth.username || "system",
+    });
+    if (!r.ok) return badRequest(res, r.error);
+    return json(res, 201, { item: { id: r.id } });
+  }
+
+  if (method === "POST" && url.pathname === "/api/integrations/dispatch") {
+    if (!requireAnyPermission(res, auth, [Permissions.FleetAdmin, Permissions.AuthAdmin])) return;
+    if (!pool) return badRequest(res, "db_required");
+    let body;
+    try {
+      body = await readJson(req);
+    } catch {
+      return badRequest(res, "invalid_json");
+    }
+    if (!body || typeof body !== "object") body = {};
+    const systemId = normalizeString(body.systemId) || null;
+    const limit = body.limit !== undefined ? Number(body.limit) : null;
+    const job = await createJob({ type: "integrations_dispatch", requestedBy: auth.username, params: { systemId, limit } });
+    if (!job.ok) return badRequest(res, job.error);
+    return json(res, 202, { jobId: job.id });
+  }
+
+  if (method === "POST" && url.pathname.startsWith("/api/integrations/inbound/")) {
+    if (!pool) return badRequest(res, "db_required");
+    const systemId = normalizeString(url.pathname.split("/").slice(4).join("/")) || null;
+    if (!systemId) return badRequest(res, "systemId_required");
+    const system = await getIntegrationSystemById(systemId);
+    if (!system) return notFound(res);
+    const cfg = system.config && typeof system.config === "object" ? system.config : {};
+    const expected = normalizeString(cfg.inboundToken || "");
+    const token = normalizeString(req.headers["x-integration-token"] || url.searchParams.get("token") || "");
+    if (!expected || !token || token !== expected) return unauthorized(res);
+    let body;
+    try {
+      body = await readJson(req);
+    } catch {
+      return badRequest(res, "invalid_json");
+    }
+    const eventId = await publishErpEvent({
+      eventType: "INTEGRATION_INBOUND_RECEIVED",
+      aggregateType: "integration_system",
+      aggregateId: system.id,
+      createdBy: integrationConsumerId(system.id) || "integration",
+      sourceModule: "integration_inbound",
+      payload: {
+        systemId: system.id,
+        kind: system.kind,
+        receivedAt: new Date().toISOString(),
+        body: body && typeof body === "object" ? body : { value: body },
+      },
+    });
+    if (!eventId) return badRequest(res, "event_publish_failed");
+    return json(res, 202, { ok: true, eventId });
+  }
+
+  if (method === "GET" && url.pathname === "/api/mobile/bootstrap") {
+    if (!requireAnyPermission(res, auth, [Permissions.MobileSync, Permissions.WorkshopView, Permissions.WorkshopAdmin, Permissions.FleetAdmin, Permissions.ViewAudit])) return;
+    const deviceId = normalizeDeviceId(url.searchParams.get("deviceId")) || null;
+    const canWorkshop = auth.permissions.has(Permissions.WorkshopView) || auth.permissions.has(Permissions.WorkshopAdmin) || auth.permissions.has(Permissions.FleetAdmin);
+    const myCases = canWorkshop && auth.username ? await listWorkshopCases({ status: "open", assignedTo: auth.username, limit: 50 }) : [];
+    return json(res, 200, {
+      serverTime: new Date().toISOString(),
+      deviceId,
+      user: { username: auth.username || null },
+      vehicles: await getVehicles(),
+      workshop: { myOpenCases: myCases },
+    });
+  }
+
+  if (method === "POST" && url.pathname === "/api/mobile/sync/push") {
+    if (!requireAnyPermission(res, auth, [Permissions.MobileSync, Permissions.FleetAdmin])) return;
+    if (!pool) return badRequest(res, "db_required");
+    let body;
+    try {
+      body = await readJson(req);
+    } catch {
+      return badRequest(res, "invalid_json");
+    }
+    if (!body || typeof body !== "object") return badRequest(res, "missing_body");
+    const deviceId = normalizeDeviceId(body.deviceId);
+    if (!deviceId) return badRequest(res, "deviceId_required");
+    const ops = Array.isArray(body.ops) ? body.ops : [];
+    if (ops.length === 0) return badRequest(res, "ops_required");
+    if (ops.length > 100) return badRequest(res, "too_many_ops");
+
+    const accepted = [];
+    const opIds = [];
+    for (const op of ops) {
+      if (!op || typeof op !== "object") continue;
+      const opId = normalizeString(op.opId);
+      const opType = normalizeKey(op.opType);
+      const occurredAt = normalizeString(op.occurredAt) || null;
+      const payload = op.payload && typeof op.payload === "object" ? op.payload : {};
+      if (!opId || !opType) continue;
+      const r = await enqueueMobileOp({ deviceId, opId, opType, occurredAt, payload, username: auth.username });
+      accepted.push({ opId, opType, id: r.id || null });
+      opIds.push(opId);
+    }
+    if (opIds.length === 0) return badRequest(res, "no_valid_ops");
+
+    const job = await createJob({ type: "mobile_apply_ops", requestedBy: auth.username, params: { deviceId, opIds } });
+    if (!job.ok) return badRequest(res, job.error);
+    publishEvent("jobs", "job_created", { jobId: job.id, type: "mobile_apply_ops", requestedBy: auth.username });
+    return json(res, 202, { ok: true, jobId: job.id, accepted });
+  }
+
+  if (method === "GET" && url.pathname === "/api/mobile/sync/ops") {
+    if (!requireAnyPermission(res, auth, [Permissions.MobileSync, Permissions.FleetAdmin, Permissions.ViewAudit])) return;
+    const deviceId = normalizeDeviceId(url.searchParams.get("deviceId"));
+    if (!deviceId) return badRequest(res, "deviceId_required");
+    const status = normalizeString(url.searchParams.get("status")) || null;
+    const limitRaw = normalizeString(url.searchParams.get("limit"));
+    const limit = limitRaw ? Number(limitRaw) : 100;
+    const items = await listMobileOps({ deviceId, status, limit });
+    return json(res, 200, { items });
+  }
+
+  if (method === "GET" && url.pathname === "/api/mobile/sync/pull") {
+    if (!requireAnyPermission(res, auth, [Permissions.MobileSync, Permissions.FleetAdmin, Permissions.ViewAudit])) return;
+    if (!pool) return badRequest(res, "db_required");
+    const deviceId = normalizeDeviceId(url.searchParams.get("deviceId"));
+    if (!deviceId) return badRequest(res, "deviceId_required");
+    const afterId = normalizeString(url.searchParams.get("afterId")) || null;
+    const limitRaw = normalizeString(url.searchParams.get("limit"));
+    const types = normalizeString(url.searchParams.get("types")) || null;
+    const aggregateType = normalizeString(url.searchParams.get("aggregateType")) || null;
+    const aggregateId = normalizeString(url.searchParams.get("aggregateId")) || null;
+    const consumer = `mobile_${deviceId}`;
+    const r = await consumeErpEvents({ consumer, afterId, limit: limitRaw ? Number(limitRaw) : 200, types, aggregateType, aggregateId });
+    if (!r.ok) return badRequest(res, r.error);
+    return json(res, 200, r);
+  }
+
+  if (method === "POST" && url.pathname === "/api/mobile/sync/ack") {
+    if (!requireAnyPermission(res, auth, [Permissions.MobileSync, Permissions.FleetAdmin])) return;
+    if (!pool) return badRequest(res, "db_required");
+    let body;
+    try {
+      body = await readJson(req);
+    } catch {
+      return badRequest(res, "invalid_json");
+    }
+    if (!body || typeof body !== "object") return badRequest(res, "missing_body");
+    const deviceId = normalizeDeviceId(body.deviceId);
+    const lastEventId = normalizeString(body.lastEventId);
+    if (!deviceId) return badRequest(res, "deviceId_required");
+    if (!lastEventId) return badRequest(res, "lastEventId_required");
+    const consumer = `mobile_${deviceId}`;
+    const ev = await getErpEventById(lastEventId);
+    if (!ev) return badRequest(res, "event_not_found");
+    const log = await recordErpConsumerDelivery({ consumer, eventId: lastEventId, status: "delivered", meta: { username: auth.username, mode: "mobile_ack" } });
+    if (!log.ok) return badRequest(res, log.error);
+    const r = await setErpConsumerOffset({ consumer, lastEventId });
+    if (!r.ok) return badRequest(res, r.error);
+    return json(res, 200, { ok: true, item: r, delivery: log });
+  }
+
   if (method === "GET" && url.pathname === "/api/docs/swagger") {
     res.writeHead(302, { location: `/swagger.html?version=${encodeURIComponent(apiVersionContext.versionKey || "v2")}` });
     return res.end();
@@ -10645,42 +17755,76 @@ const server = http.createServer(async (req, res) => {
     });
   }
 
+  if (method === "GET" && url.pathname === "/api/main-menu") {
+    if (!auth.username) return unauthorized(res);
+    const item = buildMainMenuPayload(auth);
+    await writeMainMenuAudit(req, auth, { action: "menu_loaded", sectionKey: "root", meta: { moduleCount: item.modules.length } });
+    return json(res, 200, { item });
+  }
+
+  if (method === "POST" && url.pathname === "/api/main-menu/audit") {
+    if (!auth.username) return unauthorized(res);
+    let body;
+    try {
+      body = await readJson(req);
+    } catch {
+      return badRequest(res, "invalid_json");
+    }
+    await writeMainMenuAudit(req, auth, {
+      action: body?.action || "menu_interaction",
+      sectionKey: body?.sectionKey || null,
+      menuKey: body?.menuKey || null,
+      menuLabel: body?.menuLabel || null,
+      meta: body?.meta && typeof body.meta === "object" ? body.meta : {},
+    });
+    return json(res, 201, { ok: true });
+  }
+
+  if (method === "GET" && url.pathname === "/api/main-menu/audit") {
+    if (!requireAnyPermission(res, auth, [Permissions.ViewAudit, Permissions.AuthAdmin, Permissions.FleetAdmin])) return;
+    if (!pool) return badRequest(res, "db_required");
+    const limit = Math.max(1, Math.min(500, Number(url.searchParams.get("limit")) || 100));
+    const username = normalizeString(url.searchParams.get("username")) || null;
+    const rows = await pool
+      .query(
+        `select id, user_id, username, action, section_key, menu_key, menu_label, ip_address, client, user_agent, meta, occurred_at
+         from ui_main_menu_audit
+         where ($1::text is null or username = $1)
+         order by occurred_at desc, id desc
+         limit $2;`,
+        [username, limit],
+      )
+      .then((r) => r.rows)
+      .catch(() => []);
+    return json(res, 200, {
+      items: rows.map((x) => ({
+        id: x.id,
+        userId: x.user_id || null,
+        username: x.username,
+        action: x.action,
+        sectionKey: x.section_key || null,
+        menuKey: x.menu_key || null,
+        menuLabel: x.menu_label || null,
+        ipAddress: x.ip_address || null,
+        client: x.client || null,
+        userAgent: x.user_agent || null,
+        meta: x.meta || {},
+        occurredAt: new Date(x.occurred_at).toISOString(),
+      })),
+    });
+  }
+
   if (method === "GET" && url.pathname === "/api/modules") {
     return json(res, 200, { items: modules });
   }
 
   if (method === "GET" && url.pathname === "/api/search") {
     const q = (url.searchParams.get("q") || "").trim();
-    if (!q) return json(res, 200, { items: [] });
-
-    const items = [];
-
-    const vehicles = await getVehicles();
-    for (const v of vehicles) {
-      if (!includesLoose(v.code, q) && !includesLoose(v.type, q)) continue;
-      items.push({
-        type: "vehicle",
-        title: v.code,
-        subtitle: v.type,
-        href: vehicleDeepLink(v.id),
-      });
-    }
-
-    const blocks = await getAvailabilityBlocks({ activeOnly: false });
-    for (const b of blocks) {
-      const v = vehicles.find((x) => x.id === b.vehicleId) || null;
-      if (!includesLoose(b.reason, q) && !(v && includesLoose(v.code, q))) continue;
-      items.push({
-        type: "availabilityBlock",
-        title: `Sperre: ${v ? v.code : b.vehicleId}`,
-        subtitle: b.reason,
-        href: blockDeepLink(b),
-        severity: b.severity,
-      });
-    }
-
-    items.sort((a, b) => a.type.localeCompare(b.type) || a.title.localeCompare(b.title));
-    return json(res, 200, { items: items.slice(0, 20) });
+    if (!q) return json(res, 200, { items: [], requestedModules: ["all"], searchedModules: [], skippedModules: [] });
+    const modules = normalizeSearchModules(url.searchParams.get("modules"));
+    const limitRaw = normalizeString(url.searchParams.get("limit"));
+    const result = await searchGlobal({ auth, q, modules, limit: limitRaw ? Number(limitRaw) : 20 });
+    return json(res, 200, result);
   }
 
   if (method === "GET" && url.pathname === "/api/kpis") {
@@ -10701,6 +17845,191 @@ const server = http.createServer(async (req, res) => {
 
   if (method === "GET" && url.pathname === "/api/notifications") {
     return json(res, 200, { items: await buildNotifications() });
+  }
+
+  if (method === "GET" && url.pathname === "/api/notifications/center/items") {
+    if (!auth.username && !hasAnyPermission(auth, [Permissions.FleetAdmin, Permissions.AuthAdmin, Permissions.ViewAudit])) return unauthorized(res);
+    if (!pool) return badRequest(res, "db_required");
+    const status = normalizeString(url.searchParams.get("status")) || null;
+    const includeAcknowledged = normalizeString(url.searchParams.get("includeAcknowledged")) === "true";
+    const aggregateType = normalizeString(url.searchParams.get("aggregateType")) || null;
+    const aggregateId = normalizeString(url.searchParams.get("aggregateId")) || null;
+    const limitRaw = normalizeString(url.searchParams.get("limit"));
+    const items = await listNotificationMessages({ auth, status, includeAcknowledged, aggregateType, aggregateId, limit: limitRaw ? Number(limitRaw) : 200 });
+    return json(res, 200, { items });
+  }
+
+  if (method === "POST" && url.pathname === "/api/notifications/center/ack") {
+    if (!auth.username && !hasAnyPermission(auth, [Permissions.FleetAdmin, Permissions.AuthAdmin, Permissions.ViewAudit])) return unauthorized(res);
+    if (!pool) return badRequest(res, "db_required");
+    let body;
+    try {
+      body = await readJson(req);
+    } catch {
+      return badRequest(res, "invalid_json");
+    }
+    if (!body || typeof body !== "object") return badRequest(res, "missing_body");
+    const r = await acknowledgeNotification({ notificationId: body.notificationId, auth, note: normalizeString(body.note) || null });
+    if (!r.ok) return badRequest(res, r.error);
+    return json(res, 200, { item: r.item });
+  }
+
+  if (method === "GET" && url.pathname === "/api/notifications/center/deliveries") {
+    if (!auth.username && !hasAnyPermission(auth, [Permissions.FleetAdmin, Permissions.AuthAdmin, Permissions.ViewAudit])) return unauthorized(res);
+    if (!pool) return badRequest(res, "db_required");
+    const notificationId = normalizeString(url.searchParams.get("notificationId")) || null;
+    const channel = normalizeString(url.searchParams.get("channel")) || null;
+    const limitRaw = normalizeString(url.searchParams.get("limit"));
+    const items = await listNotificationDeliveries({ auth, notificationId, channel, limit: limitRaw ? Number(limitRaw) : 500 });
+    return json(res, 200, { items });
+  }
+
+  if (method === "GET" && url.pathname === "/api/notifications/center/escalations") {
+    if (!auth.username && !hasAnyPermission(auth, [Permissions.FleetAdmin, Permissions.AuthAdmin, Permissions.ViewAudit])) return unauthorized(res);
+    if (!pool) return badRequest(res, "db_required");
+    const notificationId = normalizeString(url.searchParams.get("notificationId")) || null;
+    const limitRaw = normalizeString(url.searchParams.get("limit"));
+    const items = await listNotificationEscalations({ auth, notificationId, limit: limitRaw ? Number(limitRaw) : 500 });
+    return json(res, 200, { items });
+  }
+
+  if (method === "GET" && url.pathname === "/api/notifications/center/audit") {
+    if (!auth.username && !hasAnyPermission(auth, [Permissions.FleetAdmin, Permissions.AuthAdmin, Permissions.ViewAudit])) return unauthorized(res);
+    if (!pool) return badRequest(res, "db_required");
+    const notificationId = normalizeString(url.searchParams.get("notificationId"));
+    if (!notificationId) return badRequest(res, "notificationId_required");
+    const limitRaw = normalizeString(url.searchParams.get("limit"));
+    const items = await listNotificationAuditTrail({ auth, notificationId, limit: limitRaw ? Number(limitRaw) : 500 });
+    return json(res, 200, { items });
+  }
+
+  if (method === "GET" && url.pathname === "/api/notifications/center/channels") {
+    if (!requireAnyPermission(res, auth, [Permissions.FleetAdmin, Permissions.AuthAdmin, Permissions.ViewAudit])) return;
+    if (!pool) return badRequest(res, "db_required");
+    return json(res, 200, { items: await listNotificationChannelConfigs() });
+  }
+
+  if (method === "POST" && url.pathname === "/api/notifications/center/channels") {
+    if (!requireAnyPermission(res, auth, [Permissions.FleetAdmin, Permissions.AuthAdmin])) return;
+    if (!pool) return badRequest(res, "db_required");
+    let body;
+    try {
+      body = await readJson(req);
+    } catch {
+      return badRequest(res, "invalid_json");
+    }
+    if (!body || typeof body !== "object") return badRequest(res, "missing_body");
+    const r = await upsertNotificationChannelConfig({
+      channel: body.channel,
+      enabled: body.enabled !== false,
+      provider: body.provider || "log",
+      config: body.config && typeof body.config === "object" ? body.config : {},
+      qualityStandard: body.qualityStandard && typeof body.qualityStandard === "object" ? body.qualityStandard : {},
+      updatedBy: auth.username || "system",
+    });
+    if (!r.ok) return badRequest(res, r.error);
+    return json(res, 200, { items: await listNotificationChannelConfigs() });
+  }
+
+  if (method === "GET" && url.pathname === "/api/notifications/center/rules") {
+    if (!requireAnyPermission(res, auth, [Permissions.FleetAdmin, Permissions.AuthAdmin, Permissions.ViewAudit])) return;
+    if (!pool) return badRequest(res, "db_required");
+    const eventType = normalizeString(url.searchParams.get("eventType")) || null;
+    const activeOnly = normalizeString(url.searchParams.get("activeOnly")) === "true";
+    const limitRaw = normalizeString(url.searchParams.get("limit"));
+    return json(res, 200, { items: await listNotificationRules({ eventType, activeOnly, limit: limitRaw ? Number(limitRaw) : 200 }) });
+  }
+
+  if (method === "POST" && url.pathname === "/api/notifications/center/rules") {
+    if (!requireAnyPermission(res, auth, [Permissions.FleetAdmin, Permissions.AuthAdmin])) return;
+    if (!pool) return badRequest(res, "db_required");
+    let body;
+    try {
+      body = await readJson(req);
+    } catch {
+      return badRequest(res, "invalid_json");
+    }
+    if (!body || typeof body !== "object") return badRequest(res, "missing_body");
+    const r = await upsertNotificationRule({
+      id: body.id || null,
+      ruleKey: body.ruleKey,
+      name: body.name,
+      active: body.active !== false,
+      eventType: body.eventType,
+      aggregateType: body.aggregateType || null,
+      channels: body.channels,
+      priority: body.priority || "medium",
+      ackRequired: body.ackRequired === true,
+      slaMinutes: body.slaMinutes,
+      audience: body.audience && typeof body.audience === "object" ? body.audience : {},
+      escalationPolicy: Array.isArray(body.escalationPolicy) ? body.escalationPolicy : [],
+      template: body.template && typeof body.template === "object" ? body.template : {},
+      createdBy: auth.username || "system",
+    });
+    if (!r.ok) return badRequest(res, r.error);
+    return json(res, 200, { items: await listNotificationRules({ limit: 200 }) });
+  }
+
+  if (method === "POST" && url.pathname === "/api/notifications/center/trigger") {
+    if (!requireAnyPermission(res, auth, [Permissions.FleetAdmin, Permissions.AuthAdmin, Permissions.WorkshopAdmin])) return;
+    if (!pool) return badRequest(res, "db_required");
+    let body;
+    try {
+      body = await readJson(req);
+    } catch {
+      return badRequest(res, "invalid_json");
+    }
+    if (!body || typeof body !== "object") return badRequest(res, "missing_body");
+    let r;
+    if (body.ruleKey) {
+      r = await createNotificationFromRuleKey({
+        ruleKey: body.ruleKey,
+        aggregateType: body.aggregateType,
+        aggregateId: body.aggregateId,
+        title: body.title,
+        message: body.message,
+        payload: body.payload && typeof body.payload === "object" ? body.payload : {},
+        audience: body.audience && typeof body.audience === "object" ? body.audience : {},
+        correlationId: body.correlationId || null,
+        createdBy: auth.username || "system",
+        slaDueAt: body.slaDueAt || null,
+      });
+    } else {
+      r = await createNotificationMessage({
+        eventType: body.eventType,
+        aggregateType: body.aggregateType,
+        aggregateId: body.aggregateId,
+        title: body.title,
+        message: body.message,
+        priority: body.priority || "medium",
+        channels: body.channels,
+        audience: body.audience && typeof body.audience === "object" ? body.audience : {},
+        payload: body.payload && typeof body.payload === "object" ? body.payload : {},
+        ackRequired: body.ackRequired === true,
+        slaMinutes: body.slaMinutes,
+        slaDueAt: body.slaDueAt || null,
+        escalationPolicy: Array.isArray(body.escalationPolicy) ? body.escalationPolicy : [],
+        correlationId: body.correlationId || null,
+        createdBy: auth.username || "system",
+      });
+    }
+    if (!r.ok) return badRequest(res, r.error);
+    const dispatchJob = await enqueueNotificationDispatch({ notificationId: r.item.id, requestedBy: auth.username || "system" }).catch(() => null);
+    return json(res, 201, { item: r.item, jobId: dispatchJob && dispatchJob.ok ? dispatchJob.id : null });
+  }
+
+  if (method === "POST" && url.pathname === "/api/notifications/center/tick") {
+    if (!requireAnyPermission(res, auth, [Permissions.FleetAdmin, Permissions.AuthAdmin])) return;
+    if (!pool) return badRequest(res, "db_required");
+    const item = await tickNotificationCenter();
+    return json(res, 200, { item });
+  }
+
+  if (method === "GET" && url.pathname === "/api/notifications/center/quality") {
+    if (!requireAnyPermission(res, auth, [Permissions.FleetAdmin, Permissions.AuthAdmin, Permissions.ViewAudit])) return;
+    if (!pool) return badRequest(res, "db_required");
+    const daysRaw = normalizeString(url.searchParams.get("days"));
+    return json(res, 200, { item: await computeNotificationQuality({ days: daysRaw ? Number(daysRaw) : 7 }) });
   }
 
   if (method === "GET" && url.pathname === "/api/fleet/vehicles") {
@@ -11305,7 +18634,15 @@ const server = http.createServer(async (req, res) => {
     }
     if (!body || typeof body !== "object") body = {};
     const mode = normalizeString(body.mode) === "mock" ? "mock" : "live";
+    const asyncMode = body.async === true || normalizeString(url.searchParams.get("async")) === "true";
     if (body.insecureTls === true) return badRequest(res, "insecureTls_not_allowed");
+
+    if (asyncMode) {
+      const job = await createJob({ type: "reconcile_ahlert24_offer_vs_erp", requestedBy: auth.username, params: { mode } });
+      if (!job.ok) return badRequest(res, job.error);
+      publishEvent("jobs", "job_created", { jobId: job.id, type: "reconcile_ahlert24_offer_vs_erp", requestedBy: auth.username });
+      return json(res, 202, { ok: true, jobId: job.id });
+    }
 
     let result;
     try {
@@ -12496,7 +19833,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (method === "GET" && url.pathname === "/api/waste/orders") {
-    if (!requirePermission(res, auth, Permissions.ViewAudit)) return;
+    if (!requireAnyPermission(res, auth, [Permissions.ViewAudit, Permissions.FleetAdmin])) return;
     const id = normalizeString(url.searchParams.get("id"));
     if (id) {
       const order = await getWasteOrderById(id);
@@ -15372,6 +22709,584 @@ const server = http.createServer(async (req, res) => {
     });
   }
 
+  if (url.pathname.startsWith("/api/documents") && method !== "GET" && method !== "POST") {
+    return methodNotAllowed(res);
+  }
+
+  if (method === "GET" && url.pathname === "/api/documents") {
+    if (!requireAnyPermission(res, auth, [Permissions.DocumentView, Permissions.DocumentManage, Permissions.DocumentAdmin, Permissions.ViewAudit, Permissions.FleetAdmin])) return;
+    const docType = normalizeString(url.searchParams.get("docType")) || null;
+    const q = normalizeString(url.searchParams.get("q")) || null;
+    const limitRaw = normalizeString(url.searchParams.get("limit"));
+    const limit = Math.max(1, Math.min(200, Number(limitRaw) || 50));
+    const dt = docType ? normalizeDocumentType(docType) : null;
+    if (docType && !dt) return badRequest(res, "docType_invalid");
+    if (dt === "contract") {
+      const access = canAccessDocumentType({ auth, docType: dt, action: "view" });
+      if (!access.ok) return forbidden(res);
+    }
+    const items = await searchDocuments({ auth, docType: dt, q, filters: [], limit });
+    return json(res, 200, { items });
+  }
+
+  if (method === "POST" && url.pathname === "/api/documents/search") {
+    if (!requireAnyPermission(res, auth, [Permissions.DocumentView, Permissions.DocumentManage, Permissions.DocumentAdmin, Permissions.ViewAudit, Permissions.FleetAdmin])) return;
+    let body;
+    try {
+      body = await readJson(req);
+    } catch {
+      return badRequest(res, "invalid_json");
+    }
+    if (!body || typeof body !== "object") return badRequest(res, "missing_body");
+    const dt = body.docType ? normalizeDocumentType(body.docType) : null;
+    if (body.docType && !dt) return badRequest(res, "docType_invalid");
+    if (dt === "contract") {
+      const access = canAccessDocumentType({ auth, docType: dt, action: "view" });
+      if (!access.ok) return forbidden(res);
+    }
+    const q = normalizeString(body.q) || null;
+    const limit = Math.max(1, Math.min(200, Number(body.limit) || 50));
+    let items = [];
+    try {
+      items = await searchDocuments({ auth, docType: dt, q, filters: body.filters || [], limit });
+    } catch (e) {
+      return badRequest(res, String(e && e.message ? e.message : "search_failed"));
+    }
+    return json(res, 200, { items });
+  }
+
+  if (method === "GET" && url.pathname === "/api/documents/document") {
+    if (!requireAnyPermission(res, auth, [Permissions.DocumentView, Permissions.DocumentManage, Permissions.DocumentAdmin, Permissions.ViewAudit, Permissions.FleetAdmin])) return;
+    const id = normalizeString(url.searchParams.get("id"));
+    if (!id) return badRequest(res, "id_required");
+    const item = await getDocumentById(id);
+    if (!item) return notFound(res);
+    const access = canAccessDocumentType({ auth, docType: item.docType, action: "view" });
+    if (!access.ok) return forbidden(res);
+    const current = item.currentVersionId ? await getDocumentVersionById(item.currentVersionId) : null;
+    const mediaAnalysis = item.currentVersionId ? await getDocumentMediaAnalysis({ versionId: item.currentVersionId }) : null;
+    return json(res, 200, { item: { ...item, currentVersion: current, mediaAnalysis } });
+  }
+
+  if (method === "GET" && url.pathname === "/api/documents/versions") {
+    if (!requireAnyPermission(res, auth, [Permissions.DocumentView, Permissions.DocumentManage, Permissions.DocumentAdmin, Permissions.ViewAudit, Permissions.FleetAdmin])) return;
+    const documentId = normalizeString(url.searchParams.get("documentId"));
+    if (!documentId) return badRequest(res, "documentId_required");
+    const docRow = await pool.query(`select doc_type from doc_document where id = $1 limit 1;`, [documentId]).then((r) => r.rows[0] || null).catch(() => null);
+    if (!docRow) return notFound(res);
+    const access = canAccessDocumentType({ auth, docType: docRow.doc_type, action: "view" });
+    if (!access.ok) return forbidden(res);
+    const limitRaw = normalizeString(url.searchParams.get("limit"));
+    const limit = Math.max(1, Math.min(200, Number(limitRaw) || 50));
+    return json(res, 200, { items: await listDocumentVersions({ documentId, limit }) });
+  }
+
+  if (method === "GET" && url.pathname === "/api/documents/version") {
+    if (!requireAnyPermission(res, auth, [Permissions.DocumentView, Permissions.DocumentManage, Permissions.DocumentAdmin, Permissions.ViewAudit, Permissions.FleetAdmin])) return;
+    const id = normalizeString(url.searchParams.get("id"));
+    if (!id) return badRequest(res, "id_required");
+    const ver = await getDocumentVersionById(id);
+    if (!ver) return notFound(res);
+    const docRow = await pool.query(`select doc_type from doc_document where id = $1 limit 1;`, [ver.documentId]).then((r) => r.rows[0] || null).catch(() => null);
+    const access = canAccessDocumentType({ auth, docType: docRow?.doc_type || null, action: "view" });
+    if (!access.ok) return forbidden(res);
+    const mediaAnalysis = await getDocumentMediaAnalysis({ versionId: ver.id });
+    return json(res, 200, { item: { ...ver, mediaAnalysis } });
+  }
+
+  if (method === "GET" && url.pathname === "/api/documents/media/analysis") {
+    if (!requireAnyPermission(res, auth, [Permissions.DocumentView, Permissions.DocumentManage, Permissions.DocumentAdmin, Permissions.ViewAudit, Permissions.FleetAdmin])) return;
+    const versionId = normalizeString(url.searchParams.get("versionId")) || null;
+    const documentId = normalizeString(url.searchParams.get("documentId")) || null;
+    if (!versionId && !documentId) return badRequest(res, "versionId_or_documentId_required");
+    let docType = null;
+    if (versionId) {
+      const ver = await getDocumentVersionById(versionId);
+      if (!ver) return notFound(res);
+      const docRow = await pool.query(`select doc_type from doc_document where id = $1 limit 1;`, [ver.documentId]).then((r) => r.rows[0] || null).catch(() => null);
+      docType = docRow?.doc_type || null;
+    } else {
+      const docRow = await pool.query(`select doc_type, current_version_id from doc_document where id = $1 limit 1;`, [documentId]).then((r) => r.rows[0] || null).catch(() => null);
+      if (!docRow) return notFound(res);
+      docType = docRow.doc_type || null;
+    }
+    const access = canAccessDocumentType({ auth, docType, action: "view" });
+    if (!access.ok) return forbidden(res);
+    const item = await getDocumentMediaAnalysis({ versionId, documentId });
+    if (!item) return notFound(res);
+    return json(res, 200, { item });
+  }
+
+  if (method === "POST" && url.pathname === "/api/documents/media/process") {
+    if (!auth.username) return unauthorized(res);
+    if (!pool) return badRequest(res, "db_required");
+    let body;
+    try {
+      body = await readJson(req);
+    } catch {
+      return badRequest(res, "invalid_json");
+    }
+    if (!body || typeof body !== "object") return badRequest(res, "missing_body");
+    const versionId = normalizeString(body.versionId);
+    if (!versionId) return badRequest(res, "versionId_required");
+    const ver = await getDocumentVersionById(versionId);
+    if (!ver) return notFound(res);
+    const docRow = await pool.query(`select doc_type from doc_document where id = $1 limit 1;`, [ver.documentId]).then((r) => r.rows[0] || null).catch(() => null);
+    const access = canAccessDocumentType({ auth, docType: docRow?.doc_type || null, action: "manage" });
+    if (!access.ok) return forbidden(res);
+    const r = await analyzeDocumentVersion({ versionId, force: body.force === true });
+    if (!r.ok) return badRequest(res, r.error);
+    return json(res, 200, { item: r.item, reused: r.reused === true });
+  }
+
+  if (method === "GET" && url.pathname === "/api/documents/media/preview") {
+    if (!requireAnyPermission(res, auth, [Permissions.DocumentView, Permissions.DocumentManage, Permissions.DocumentAdmin, Permissions.ViewAudit, Permissions.FleetAdmin])) return;
+    const versionId = normalizeString(url.searchParams.get("versionId"));
+    if (!versionId) return badRequest(res, "versionId_required");
+    const ver = await getDocumentVersionById(versionId);
+    if (!ver) return notFound(res);
+    const docRow = await pool.query(`select doc_type from doc_document where id = $1 limit 1;`, [ver.documentId]).then((r) => r.rows[0] || null).catch(() => null);
+    const access = canAccessDocumentType({ auth, docType: docRow?.doc_type || null, action: "view" });
+    if (!access.ok) return forbidden(res);
+    let analysis = await getDocumentMediaAnalysis({ versionId });
+    if (!analysis) {
+      const generated = await analyzeDocumentVersion({ versionId }).catch(() => null);
+      analysis = generated && generated.ok ? generated.item : null;
+    }
+    if (!analysis || !analysis.previewStoragePath) return notFound(res);
+    const abs = path.resolve(String(analysis.previewStoragePath || ""));
+    if (!isDocumentStorePathSafe(abs)) return badRequest(res, "storage_path_forbidden");
+    const buf = await fs.promises.readFile(abs).catch(() => null);
+    if (!buf) return notFound(res);
+    return sendBinary(res, 200, buf, { contentType: "image/png", filename: `${versionId}_preview.png` });
+  }
+
+  if (method === "GET" && (url.pathname === "/api/documents/version/content" || url.pathname === "/api/documents/version/download")) {
+    if (!requireAnyPermission(res, auth, [Permissions.DocumentView, Permissions.DocumentManage, Permissions.DocumentAdmin, Permissions.ViewAudit, Permissions.FleetAdmin])) return;
+    const id = normalizeString(url.searchParams.get("id"));
+    if (!id) return badRequest(res, "id_required");
+    const ver = await getDocumentVersionById(id);
+    if (!ver) return notFound(res);
+    const docRow = await pool.query(`select doc_type from doc_document where id = $1 limit 1;`, [ver.documentId]).then((r) => r.rows[0] || null).catch(() => null);
+    const access = canAccessDocumentType({ auth, docType: docRow?.doc_type || null, action: url.pathname.endsWith("/download") ? "export" : "view" });
+    if (!access.ok) return forbidden(res);
+    const root = path.resolve(docStoreDir) + path.sep;
+    const abs = path.resolve(String(ver.storagePath || ""));
+    if (!abs.startsWith(root)) return badRequest(res, "storage_path_forbidden");
+    let buf;
+    try {
+      buf = await fs.promises.readFile(abs);
+    } catch {
+      return notFound(res);
+    }
+    const name = ver.filename || `${ver.id}.${fileExtFromMime(ver.mimeType)}`;
+    if (url.pathname.endsWith("/download")) {
+      res.writeHead(200, {
+        "content-type": ver.mimeType,
+        "content-length": buf.length,
+        "cache-control": "no-store",
+        "content-disposition": `attachment; filename="${String(name).replaceAll('"', "")}"`,
+      });
+      return res.end(buf);
+    }
+    return sendBinary(res, 200, buf, { contentType: ver.mimeType, filename: name });
+  }
+
+  if (method === "GET" && url.pathname === "/api/documents/export") {
+    if (!requireAnyPermission(res, auth, [Permissions.DocumentExport, Permissions.DocumentAdmin, Permissions.FleetAdmin])) return;
+    const documentId = normalizeString(url.searchParams.get("documentId"));
+    if (!documentId) return badRequest(res, "documentId_required");
+    const docRow = await pool.query(`select id, doc_type, current_version_id from doc_document where id = $1 limit 1;`, [documentId]).then((r) => r.rows[0] || null).catch(() => null);
+    if (!docRow) return notFound(res);
+    const access = canAccessDocumentType({ auth, docType: docRow.doc_type, action: "export" });
+    if (!access.ok) return forbidden(res);
+    const verId = docRow.current_version_id || null;
+    if (!verId) return badRequest(res, "no_current_version");
+    const ver = await getDocumentVersionById(verId);
+    if (!ver) return notFound(res);
+    const root = path.resolve(docStoreDir) + path.sep;
+    const abs = path.resolve(String(ver.storagePath || ""));
+    if (!abs.startsWith(root)) return badRequest(res, "storage_path_forbidden");
+    let buf;
+    try {
+      buf = await fs.promises.readFile(abs);
+    } catch {
+      return notFound(res);
+    }
+    const name = ver.filename || `${ver.id}.${fileExtFromMime(ver.mimeType)}`;
+    res.writeHead(200, {
+      "content-type": ver.mimeType,
+      "content-length": buf.length,
+      "cache-control": "no-store",
+      "content-disposition": `attachment; filename="${String(name).replaceAll('"', "")}"`,
+    });
+    res.end(buf);
+    await publishErpEvent({ eventType: "DOCUMENT_EXPORTED", aggregateType: "document", aggregateId: documentId, createdBy: auth.username, payload: { documentId, versionId: ver.id } });
+    return;
+  }
+
+  if (method === "POST" && url.pathname === "/api/documents/upload") {
+    if (!auth.username) return unauthorized(res);
+    if (!pool) return badRequest(res, "db_required");
+    let body;
+    try {
+      body = await readJson(req);
+    } catch {
+      return badRequest(res, "invalid_json");
+    }
+    if (!body || typeof body !== "object") return badRequest(res, "missing_body");
+    const dt = normalizeDocumentType(body.docType);
+    if (!dt) return badRequest(res, "docType_invalid");
+    const access = canAccessDocumentType({ auth, docType: dt, action: "manage" });
+    if (!access.ok) return forbidden(res);
+    const r = await createDocumentWithInitialVersion({
+      docType: dt,
+      title: body.title,
+      filename: body.filename || null,
+      mimeType: body.mimeType,
+      contentBase64: body.contentBase64,
+      comment: body.comment || null,
+      createdBy: auth.username,
+      metadata: body.metadata && typeof body.metadata === "object" ? body.metadata : {},
+    });
+    if (!r.ok) return badRequest(res, r.error);
+    const item = await getDocumentById(r.documentId);
+    return json(res, 201, { documentId: r.documentId, versionId: r.versionId, item });
+  }
+
+  if (method === "POST" && url.pathname === "/api/documents/version") {
+    if (!auth.username) return unauthorized(res);
+    if (!pool) return badRequest(res, "db_required");
+    let body;
+    try {
+      body = await readJson(req);
+    } catch {
+      return badRequest(res, "invalid_json");
+    }
+    if (!body || typeof body !== "object") return badRequest(res, "missing_body");
+    const documentId = normalizeString(body.documentId);
+    if (!documentId) return badRequest(res, "documentId_required");
+    const docRow = await pool.query(`select doc_type from doc_document where id = $1 limit 1;`, [documentId]).then((r) => r.rows[0] || null).catch(() => null);
+    if (!docRow) return notFound(res);
+    const access = canAccessDocumentType({ auth, docType: docRow.doc_type, action: "manage" });
+    if (!access.ok) return forbidden(res);
+    const r = await addDocumentVersion({
+      documentId,
+      mimeType: body.mimeType,
+      contentBase64: body.contentBase64,
+      comment: body.comment || null,
+      filename: body.filename || null,
+      createdBy: auth.username,
+    });
+    if (!r.ok) return badRequest(res, r.error);
+    return json(res, 201, { item: r });
+  }
+
+  if (method === "POST" && url.pathname === "/api/documents/restore") {
+    if (!auth.username) return unauthorized(res);
+    if (!pool) return badRequest(res, "db_required");
+    let body;
+    try {
+      body = await readJson(req);
+    } catch {
+      return badRequest(res, "invalid_json");
+    }
+    if (!body || typeof body !== "object") return badRequest(res, "missing_body");
+    const documentId = normalizeString(body.documentId);
+    const versionId = normalizeString(body.versionId);
+    if (!documentId) return badRequest(res, "documentId_required");
+    if (!versionId) return badRequest(res, "versionId_required");
+    const docRow = await pool.query(`select doc_type from doc_document where id = $1 limit 1;`, [documentId]).then((r) => r.rows[0] || null).catch(() => null);
+    if (!docRow) return notFound(res);
+    const access = canAccessDocumentType({ auth, docType: docRow.doc_type, action: "manage" });
+    if (!access.ok) return forbidden(res);
+    const r = await restoreDocumentVersion({ documentId, versionId, createdBy: auth.username, comment: body.comment || null });
+    if (!r.ok) return badRequest(res, r.error);
+    return json(res, 201, { item: r });
+  }
+
+  if (method === "GET" && url.pathname === "/api/documents/metadata/fields") {
+    if (!requireAnyPermission(res, auth, [Permissions.DocumentView, Permissions.DocumentManage, Permissions.DocumentAdmin, Permissions.FleetAdmin, Permissions.ViewAudit])) return;
+    const dtRaw = normalizeString(url.searchParams.get("docType")) || null;
+    const dt = dtRaw ? normalizeDocumentType(dtRaw) : null;
+    if (dtRaw && !dt) return badRequest(res, "docType_invalid");
+    if (dt === "contract") {
+      const access = canAccessDocumentType({ auth, docType: dt, action: "view" });
+      if (!access.ok) return forbidden(res);
+    }
+    return json(res, 200, { items: await listDocumentMetadataFields({ docType: dt }) });
+  }
+
+  if (method === "POST" && url.pathname === "/api/documents/metadata/fields") {
+    if (!requireAnyPermission(res, auth, [Permissions.DocumentAdmin, Permissions.FleetAdmin])) return;
+    let body;
+    try {
+      body = await readJson(req);
+    } catch {
+      return badRequest(res, "invalid_json");
+    }
+    if (!body || typeof body !== "object") return badRequest(res, "missing_body");
+    const r = await createDocumentMetadataField({
+      docType: body.docType,
+      key: body.key,
+      label: body.label,
+      valueType: body.valueType,
+      required: body.required === true,
+      filterable: body.filterable !== false,
+      fulltext: body.fulltext !== false,
+    });
+    if (!r.ok) return badRequest(res, r.error);
+    await publishErpEvent({
+      eventType: "DOCUMENT_METADATA_FIELD_CREATED",
+      aggregateType: "document",
+      aggregateId: `field:${r.item.docType}:${r.item.key}`,
+      createdBy: auth.username,
+      payload: r.item,
+    });
+    return json(res, 201, { item: r.item });
+  }
+
+  if (method === "POST" && url.pathname === "/api/documents/metadata/set") {
+    if (!auth.username) return unauthorized(res);
+    if (!pool) return badRequest(res, "db_required");
+    let body;
+    try {
+      body = await readJson(req);
+    } catch {
+      return badRequest(res, "invalid_json");
+    }
+    if (!body || typeof body !== "object") return badRequest(res, "missing_body");
+    const documentId = normalizeString(body.documentId);
+    if (!documentId) return badRequest(res, "documentId_required");
+    const docRow = await pool.query(`select doc_type from doc_document where id = $1 limit 1;`, [documentId]).then((r) => r.rows[0] || null).catch(() => null);
+    if (!docRow) return notFound(res);
+    const access = canAccessDocumentType({ auth, docType: docRow.doc_type, action: "manage" });
+    if (!access.ok) return forbidden(res);
+    const r = await setDocumentMetadata({ documentId, docType: docRow.doc_type, metadata: body.metadata, updatedBy: auth.username });
+    if (!r.ok) return badRequest(res, r.error);
+    return json(res, 200, { ok: true });
+  }
+
+  if (method === "POST" && url.pathname === "/api/documents/signing-key") {
+    if (!auth.username) return unauthorized(res);
+    if (!pool) return badRequest(res, "db_required");
+    if (!requireAnyPermission(res, auth, [Permissions.DocumentSign, Permissions.DocumentAdmin, Permissions.FleetAdmin])) return;
+    let body;
+    try {
+      body = await readJson(req);
+    } catch {
+      return badRequest(res, "invalid_json");
+    }
+    if (!body || typeof body !== "object") return badRequest(res, "missing_body");
+    let userId = await resolveAuthUserId(auth);
+    if (!userId && allowInsecureHeaders) userId = await ensureSystemAuthUserForUsername(auth.username);
+    if (!userId) return badRequest(res, "user_not_in_db");
+    const r = await upsertUserSigningKey({ userId, alg: body.alg || "ed25519", publicKeyPem: body.publicKeyPem });
+    if (!r.ok) return badRequest(res, r.error);
+    await publishErpEvent({
+      eventType: "DOCUMENT_SIGNING_KEY_SET",
+      aggregateType: "auth_user",
+      aggregateId: userId,
+      createdBy: auth.username,
+      payload: { userId, alg: normalizeString(body.alg || "ed25519").toLowerCase() },
+    });
+    return json(res, 200, { ok: true });
+  }
+
+  if (method === "GET" && url.pathname === "/api/documents/signing-payload") {
+    if (!auth.username) return unauthorized(res);
+    if (!pool) return badRequest(res, "db_required");
+    if (!requireAnyPermission(res, auth, [Permissions.DocumentSign, Permissions.DocumentAdmin, Permissions.FleetAdmin])) return;
+    const versionId = normalizeString(url.searchParams.get("versionId"));
+    if (!versionId) return badRequest(res, "versionId_required");
+    const ver = await getDocumentVersionById(versionId);
+    if (!ver) return notFound(res);
+    const docRow = await pool.query(`select doc_type from doc_document where id = $1 limit 1;`, [ver.documentId]).then((r) => r.rows[0] || null).catch(() => null);
+    const access = canAccessDocumentType({ auth, docType: docRow?.doc_type || null, action: "sign" });
+    if (!access.ok) return forbidden(res);
+    const payload = await buildSigningPayloadForVersion({ versionId });
+    if (!payload) return badRequest(res, "signing_payload_invalid");
+    return json(res, 200, { item: payload });
+  }
+
+  if (method === "POST" && url.pathname === "/api/documents/sign") {
+    if (!auth.username) return unauthorized(res);
+    if (!pool) return badRequest(res, "db_required");
+    if (!requireAnyPermission(res, auth, [Permissions.DocumentSign, Permissions.DocumentAdmin, Permissions.FleetAdmin])) return;
+    let body;
+    try {
+      body = await readJson(req);
+    } catch {
+      return badRequest(res, "invalid_json");
+    }
+    if (!body || typeof body !== "object") return badRequest(res, "missing_body");
+    let userId = await resolveAuthUserId(auth);
+    if (!userId && allowInsecureHeaders) userId = await ensureSystemAuthUserForUsername(auth.username);
+    if (!userId) return badRequest(res, "user_not_in_db");
+    const r = await verifyAndStoreDocumentSignature({ versionId: body.versionId, auth, alg: body.alg || "ed25519", signatureBase64: body.signatureBase64, meta: body.meta || {} });
+    if (!r.ok) return badRequest(res, r.error);
+    return json(res, 201, { item: r });
+  }
+
+  if (method === "GET" && url.pathname === "/api/documents/signatures") {
+    if (!requireAnyPermission(res, auth, [Permissions.DocumentView, Permissions.DocumentManage, Permissions.DocumentAdmin, Permissions.ViewAudit, Permissions.FleetAdmin])) return;
+    const versionId = normalizeString(url.searchParams.get("versionId"));
+    if (!versionId) return badRequest(res, "versionId_required");
+    const ver = await getDocumentVersionById(versionId);
+    if (!ver) return notFound(res);
+    const docRow = await pool.query(`select doc_type from doc_document where id = $1 limit 1;`, [ver.documentId]).then((r) => r.rows[0] || null).catch(() => null);
+    const access = canAccessDocumentType({ auth, docType: docRow?.doc_type || null, action: "view" });
+    if (!access.ok) return forbidden(res);
+    return json(res, 200, { items: await listDocumentSignatures({ versionId }) });
+  }
+
+  if (method === "GET" && url.pathname === "/api/documents/signature/verify") {
+    if (!requireAnyPermission(res, auth, [Permissions.DocumentView, Permissions.DocumentManage, Permissions.DocumentAdmin, Permissions.ViewAudit, Permissions.FleetAdmin])) return;
+    const signatureId = normalizeString(url.searchParams.get("signatureId"));
+    if (!signatureId) return badRequest(res, "signatureId_required");
+    const sig = await getDocumentSignatureById(signatureId);
+    if (!sig) return notFound(res);
+    const ver = await getDocumentVersionById(sig.versionId);
+    if (!ver) return notFound(res);
+    const docRow = await pool.query(`select doc_type from doc_document where id = $1 limit 1;`, [ver.documentId]).then((r) => r.rows[0] || null).catch(() => null);
+    const access = canAccessDocumentType({ auth, docType: docRow?.doc_type || null, action: "view" });
+    if (!access.ok) return forbidden(res);
+    const r = await verifyDocumentSignature({ signatureId });
+    if (!r.ok) return badRequest(res, r.error);
+    return json(res, 200, { item: r });
+  }
+
+  if (url.pathname.startsWith("/api/mdm") && method !== "GET" && method !== "POST") {
+    return methodNotAllowed(res);
+  }
+
+  if (method === "POST" && url.pathname === "/api/mdm/scan") {
+    if (!requireAnyPermission(res, auth, [Permissions.MdmManage, Permissions.MdmAdmin, Permissions.FleetAdmin, Permissions.ApprovalApproveMasterdata])) return;
+    let body;
+    try {
+      body = await readJson(req);
+    } catch {
+      return badRequest(res, "invalid_json");
+    }
+    if (!body || typeof body !== "object") return badRequest(res, "missing_body");
+    const entityType = normalizeMdmEntityType(body.entityType);
+    if (!entityType) return badRequest(res, "entityType_invalid");
+    const scan = await mdmScanDuplicates({ entityType, limitRecords: body.limitRecords || 5000, threshold: body.threshold ?? null, modelKey: body.modelKey || "default" });
+    const qc = await mdmRunQualityChecks({ entityType, limitRecords: body.qualityLimitRecords || 200 });
+    const autoMerge = body.autoMerge === true ? await mdmAutoMergeStrongMatches({ entityType, threshold: body.threshold ?? null, limit: body.autoMergeLimit || 100, username: auth.username, modelKey: body.modelKey || "default" }) : null;
+    if (!scan.ok) return badRequest(res, scan.error);
+    if (!qc.ok) return badRequest(res, qc.error);
+    if (autoMerge && !autoMerge.ok) return badRequest(res, autoMerge.error);
+    return json(res, 200, { scan, quality: qc, autoMerge });
+  }
+
+  if (method === "GET" && url.pathname === "/api/mdm/duplicates") {
+    if (!requireAnyPermission(res, auth, [Permissions.MdmView, Permissions.MdmManage, Permissions.MdmAdmin, Permissions.FleetAdmin, Permissions.ApprovalApproveMasterdata])) return;
+    const entityType = normalizeMdmEntityType(url.searchParams.get("entityType"));
+    if (!entityType) return badRequest(res, "entityType_invalid");
+    const status = normalizeString(url.searchParams.get("status")) || null;
+    const leftRef = normalizeString(url.searchParams.get("leftRef")) || null;
+    const rightRef = normalizeString(url.searchParams.get("rightRef")) || null;
+    const limit = Math.max(1, Math.min(500, Number(url.searchParams.get("limit")) || 100));
+    const items = await mdmListCandidates({ entityType, status, leftRef, rightRef, limit });
+    return json(res, 200, { items });
+  }
+
+  if (method === "POST" && url.pathname === "/api/mdm/duplicates/decide") {
+    if (!auth.username) return unauthorized(res);
+    if (!requireAnyPermission(res, auth, [Permissions.MdmManage, Permissions.MdmAdmin, Permissions.FleetAdmin, Permissions.ApprovalApproveMasterdata])) return;
+    let body;
+    try {
+      body = await readJson(req);
+    } catch {
+      return badRequest(res, "invalid_json");
+    }
+    if (!body || typeof body !== "object") return badRequest(res, "missing_body");
+    const r = await mdmDecideCandidate({ id: body.id, decision: body.decision, username: auth.username, reason: body.reason || null });
+    if (!r.ok) return badRequest(res, r.error);
+    return json(res, 200, { ok: true, status: r.status });
+  }
+
+  if (method === "POST" && url.pathname === "/api/mdm/golden/merge") {
+    if (!auth.username) return unauthorized(res);
+    if (!requireAnyPermission(res, auth, [Permissions.MdmManage, Permissions.MdmAdmin, Permissions.FleetAdmin, Permissions.ApprovalApproveMasterdata])) return;
+    let body;
+    try {
+      body = await readJson(req);
+    } catch {
+      return badRequest(res, "invalid_json");
+    }
+    if (!body || typeof body !== "object") return badRequest(res, "missing_body");
+    const entityType = normalizeMdmEntityType(body.entityType);
+    if (!entityType) return badRequest(res, "entityType_invalid");
+    const r = await mdmUpsertGoldenRecord({ entityType, sourceRefs: body.sourceRefs || [], username: auth.username, reason: body.reason || null });
+    if (!r.ok) return badRequest(res, r.error);
+    await pool.query(`update mdm_match_candidate set status = 'merged' where entity_type = $1 and status = 'confirmed' and ((left_ref = any($2::text[]) and right_ref = any($2::text[])) or (right_ref = any($2::text[]) and left_ref = any($2::text[])));`, [entityType, r.sourceRefs]).catch(() => {});
+    return json(res, 201, { item: r });
+  }
+
+  if (method === "GET" && url.pathname === "/api/mdm/golden") {
+    if (!requireAnyPermission(res, auth, [Permissions.MdmView, Permissions.MdmManage, Permissions.MdmAdmin, Permissions.FleetAdmin, Permissions.ApprovalApproveMasterdata])) return;
+    const entityType = normalizeMdmEntityType(url.searchParams.get("entityType"));
+    if (!entityType) return badRequest(res, "entityType_invalid");
+    const id = normalizeString(url.searchParams.get("id")) || null;
+    const sourceRef = normalizeString(url.searchParams.get("sourceRef")) || null;
+    const item = await mdmGetGolden({ entityType, goldenId: id, sourceRef });
+    if (!item) return notFound(res);
+    return json(res, 200, { item });
+  }
+
+  if (method === "GET" && url.pathname === "/api/mdm/issues") {
+    if (!requireAnyPermission(res, auth, [Permissions.MdmView, Permissions.MdmManage, Permissions.MdmAdmin, Permissions.FleetAdmin, Permissions.ApprovalApproveMasterdata])) return;
+    const entityTypeRaw = normalizeString(url.searchParams.get("entityType")) || null;
+    const entityType = entityTypeRaw ? normalizeMdmEntityType(entityTypeRaw) : null;
+    if (entityTypeRaw && !entityType) return badRequest(res, "entityType_invalid");
+    const status = normalizeString(url.searchParams.get("status")) || "open";
+    const severity = normalizeString(url.searchParams.get("severity")) || null;
+    const limit = Math.max(1, Math.min(500, Number(url.searchParams.get("limit")) || 100));
+    const items = await mdmListIssues({ status, severity, entityType, limit });
+    return json(res, 200, { items });
+  }
+
+  if (method === "POST" && url.pathname === "/api/mdm/issues/resolve") {
+    if (!auth.username) return unauthorized(res);
+    if (!requireAnyPermission(res, auth, [Permissions.MdmManage, Permissions.MdmAdmin, Permissions.FleetAdmin, Permissions.ApprovalApproveMasterdata])) return;
+    let body;
+    try {
+      body = await readJson(req);
+    } catch {
+      return badRequest(res, "invalid_json");
+    }
+    if (!body || typeof body !== "object") return badRequest(res, "missing_body");
+    const r = await mdmResolveIssue({ id: body.id, resolution: body.resolution, username: auth.username });
+    if (!r.ok) return badRequest(res, r.error);
+    return json(res, 200, { ok: true });
+  }
+
+  if (method === "GET" && url.pathname === "/api/mdm/model") {
+    if (!requireAnyPermission(res, auth, [Permissions.MdmView, Permissions.MdmManage, Permissions.MdmAdmin, Permissions.FleetAdmin])) return;
+    const entityType = normalizeMdmEntityType(url.searchParams.get("entityType"));
+    if (!entityType) return badRequest(res, "entityType_invalid");
+    const item = await mdmGetOrInitModel({ entityType, modelKey: normalizeString(url.searchParams.get("modelKey")) || "default" });
+    if (!item) return notFound(res);
+    return json(res, 200, { item });
+  }
+
+  if (method === "POST" && url.pathname === "/api/mdm/model/label") {
+    if (!auth.username) return unauthorized(res);
+    if (!requireAnyPermission(res, auth, [Permissions.MdmLabel, Permissions.MdmAdmin, Permissions.FleetAdmin])) return;
+    let body;
+    try {
+      body = await readJson(req);
+    } catch {
+      return badRequest(res, "invalid_json");
+    }
+    if (!body || typeof body !== "object") return badRequest(res, "missing_body");
+    const r = await mdmLabelAndTrain({ entityType: body.entityType, leftRef: body.leftRef, rightRef: body.rightRef, label: body.label, username: auth.username, modelKey: body.modelKey || "default" });
+    if (!r.ok) return badRequest(res, r.error);
+    return json(res, 200, { item: r });
+  }
+
   if (url.pathname.startsWith("/api/approvals") && method !== "GET" && method !== "POST") {
     return methodNotAllowed(res);
   }
@@ -15896,6 +23811,28 @@ const server = http.createServer(async (req, res) => {
   }
 
   return notFound(res);
+    } catch (e) {
+      res.__errorCode = res.__errorCode || "internal_error";
+      res.__errorMessage = res.__errorMessage || (e && e.message ? String(e.message) : null);
+      try {
+        span.setStatus({ code: SpanStatusCode.ERROR });
+      } catch {}
+      try {
+        if (!res.headersSent) json(res, 500, { error: "internal_error" });
+      } catch {
+        try {
+          if (!res.writableEnded) res.end();
+        } catch {}
+      }
+      try {
+        if (span.isRecording && span.isRecording()) span.end();
+      } catch {
+        try {
+          span.end();
+        } catch {}
+      }
+    }
+  });
 });
 
 let hereSchedulerTimer = null;
@@ -15932,6 +23869,7 @@ async function main() {
     const mig = await runMigrations({ direction: "up" });
     if (!mig.ok) throw new Error(mig.error || "migrations_failed");
     await ensureBootstrapAdmin();
+    await ensureBootstrapRoles();
     const workerId = normalizeString(process.env.ERP_WORKER_ID) || `worker_${process.pid}`;
     let stopped = false;
     process.on("SIGINT", () => {
@@ -15940,13 +23878,19 @@ async function main() {
     process.on("SIGTERM", () => {
       stopped = true;
     });
+    let lastRecoveryAt = 0;
     while (!stopped) {
+      const nowMs = Date.now();
+      if (nowMs - lastRecoveryAt > 30_000) {
+        lastRecoveryAt = nowMs;
+        await recoverStaleRunningJobs({ workerId });
+      }
       const job = await claimNextJob({ workerId });
       if (!job) {
         await new Promise((r) => setTimeout(r, 750));
         continue;
       }
-      await runJob({ job });
+      await runJob({ job, workerId });
     }
     return;
   }
@@ -15955,6 +23899,7 @@ async function main() {
   if (!mig.ok) throw new Error(mig.error || "migrations_failed");
 
   await ensureBootstrapAdmin();
+  await ensureBootstrapRoles();
 
   const seed = String(process.env.ERP_SEED_DATA || "").trim().toLowerCase();
   const doSeed = seed ? seed === "true" : allowInsecureHeaders || envName !== "production";
@@ -15964,6 +23909,8 @@ async function main() {
     console.log(`api listening on :${port}`);
     startHereTrafficScheduler();
     startApprovalEscalationScheduler();
+    startNotificationCenterScheduler();
+    startMdmQualityScheduler();
   });
 }
 

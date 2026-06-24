@@ -37,6 +37,7 @@
           <button data-view="pruefungen" class="nav-btn min-h-[44px] whitespace-nowrap rounded-xl border bg-white px-3 text-sm font-medium">Prüfungen</button>
         </nav>
 
+        <button id="btn-main-menu" class="min-h-[44px] rounded-xl bg-slate-900 px-3 text-sm font-medium text-white">Hauptmenü</button>
         <button id="btn-settings" class="min-h-[44px] rounded-xl border bg-white px-3 text-sm font-medium">Zugang</button>
       </div>
     </header>
@@ -365,6 +366,9 @@
       const state = {
         view: "dashboard",
         auth: loadAuth(),
+        mainMenu: null,
+        allowedViews: new Set(["dashboard"]),
+        activeMenuTab: "system",
         stream: null,
         streamReconnectMs: 1000,
         debounceTimer: null,
@@ -403,6 +407,7 @@
       function saveAuth(user, permissions) {
         state.auth = { user: String(user || ""), permissions: String(permissions || "") };
         localStorage.setItem("ahlert_auth", JSON.stringify(state.auth));
+        loadMainMenu().catch(() => renderTopNav());
         connectStream();
       }
 
@@ -461,7 +466,34 @@
       document.getElementById("modal-close").addEventListener("click", () => closeModal());
       document.getElementById("modal-backdrop").addEventListener("click", () => closeModal());
 
+      function renderTopNav() {
+        const allowed = state.mainMenu?.modules || [{ key: "dashboard", view: "dashboard", label: "Dashboard" }];
+        for (const b of document.querySelectorAll(".nav-btn")) {
+          const view = b.getAttribute("data-view");
+          const item = allowed.find((x) => x.view === view);
+          b.classList.toggle("hidden", !item);
+          if (item) b.textContent = item.label;
+        }
+      }
+
+      async function auditMainMenu(action, payload = {}) {
+        if (!state.auth.user) return;
+        try { await api("/api/main-menu/audit", { method: "POST", headers: { "x-client": "site/index.html" }, body: { action, ...payload } }); } catch {}
+      }
+
+      async function loadMainMenu() {
+        if (!state.auth.user) {
+          state.mainMenu = null; state.allowedViews = new Set(["dashboard"]); renderTopNav(); return null;
+        }
+        const data = await api("/api/main-menu");
+        state.mainMenu = data.item || null;
+        state.allowedViews = new Set(["dashboard", ...((state.mainMenu?.modules || []).map((x) => x.view).filter(Boolean))]);
+        renderTopNav();
+        return state.mainMenu;
+      }
+
       function setView(v) {
+        if (v !== "dashboard" && !state.allowedViews.has(v)) return;
         state.view = v;
         for (const el of document.querySelectorAll(".view")) el.classList.add("hidden");
         const active = document.getElementById(`view-${v}`);
@@ -469,20 +501,16 @@
         for (const b of document.querySelectorAll(".nav-btn")) {
           const on = b.getAttribute("data-view") === v;
           b.className = `nav-btn min-h-[44px] whitespace-nowrap rounded-xl border px-3 text-sm font-medium ${on ? "bg-slate-900 text-white border-slate-900" : "bg-white hover:bg-slate-50"}`;
+          if (!state.allowedViews.has(b.getAttribute("data-view")) && b.getAttribute("data-view") !== "dashboard") b.classList.add("hidden");
         }
+        auditMainMenu("navigation_changed", { sectionKey: "modules", menuKey: v, menuLabel: v });
         refreshView().catch(() => {});
         if (state.viewTimer) clearInterval(state.viewTimer);
         state.viewTimer = null;
-        if (v === "disposition") {
-          state.viewTimer = setInterval(() => {
-            if (state.view === "disposition") loadDisposition().catch(() => {});
-          }, 5 * 60 * 1000);
-        }
+        if (v === "disposition") state.viewTimer = setInterval(() => { if (state.view === "disposition") loadDisposition().catch(() => {}); }, 5 * 60 * 1000);
       }
 
-      for (const b of document.querySelectorAll(".nav-btn")) {
-        b.addEventListener("click", () => setView(b.getAttribute("data-view")));
-      }
+      for (const b of document.querySelectorAll(".nav-btn")) b.addEventListener("click", () => setView(b.getAttribute("data-view")));
 
       function scheduleRefresh() {
         if (state.debounceTimer) clearTimeout(state.debounceTimer);
@@ -1720,7 +1748,79 @@
         await loadPricing();
       });
 
-      document.getElementById("btn-settings").addEventListener("click", () => {
+      function mainMenuPermissions() {
+        return String(state.auth.permissions || "")
+          .split(",")
+          .map((p) => p.trim())
+          .filter(Boolean);
+      }
+
+      function moduleAccessAllowed(view, permissions = mainMenuPermissions()) {
+        const rules = {
+          dashboard: [],
+          disposition: ["WASTE_ROUTE_PLAN", "FLEET_ADMIN", "*"],
+          customers: ["CUSTOMER_MANAGE", "FLEET_ADMIN", "*"],
+          contracts: ["CONTRACT_MANAGE", "FLEET_ADMIN", "*"],
+          pricing: ["PRICING_MANAGE", "FLEET_ADMIN", "*"],
+          pool: ["WORKSHOP_VIEW", "FLEET_ADMIN", "*"],
+          slotplan: ["WORKSHOP_VIEW", "FLEET_ADMIN", "*"],
+          lager: ["WORKSHOP_VIEW", "FLEET_ADMIN", "*"],
+          pruefungen: ["WORKSHOP_VIEW", "FLEET_ADMIN", "*"],
+        };
+        const required = rules[view] || [];
+        if (!required.length) return true;
+        if (!state.auth.user) return false;
+        if (!permissions.length) return true;
+        return required.some((perm) => permissions.includes(perm));
+      }
+
+      function auditMainMenu(action, payload = {}) {
+        try {
+          const key = "ahlert_main_menu_audit";
+          const items = JSON.parse(localStorage.getItem(key) || "[]");
+          items.push({
+            action,
+            payload,
+            at: new Date().toISOString(),
+            user: state.auth.user || "",
+            view: state.view || "dashboard",
+          });
+          localStorage.setItem(key, JSON.stringify(items.slice(-100)));
+        } catch {}
+      }
+
+      async function loadMainMenu() {
+        const trigger = document.getElementById("btn-settings");
+        if (trigger) trigger.textContent = "Menü";
+        const permissions = mainMenuPermissions();
+        const modules = Array.from(document.querySelectorAll(".nav-btn"))
+          .map((b) => ({
+            key: b.getAttribute("data-view") || "",
+            view: b.getAttribute("data-view") || "",
+            label: b.textContent.trim(),
+            moduleKey: b.getAttribute("data-view") || "",
+          }))
+          .filter((m) => moduleAccessAllowed(m.view, permissions));
+        state.mainMenu = {
+          system: {
+            appName: "Ahlert ERP",
+            brandClaim: "Verwertung. Kanal. Brennstoffe.",
+            serverTime: new Date().toISOString(),
+            moduleCount: modules.length,
+            activeView: state.view || "dashboard",
+          },
+          user: {
+            username: state.auth.user || "—",
+            id: state.auth.user || "—",
+            mode: state.auth.user ? "auth" : "guest",
+            permissions,
+          },
+          modules,
+        };
+        return state.mainMenu;
+      }
+
+      function openAuthSettings() {
         openModal(
           "Zugang",
           `
@@ -1735,9 +1835,85 @@
           const u = document.getElementById("auth-user").value.trim();
           const p = document.getElementById("auth-perms").value.trim();
           saveAuth(u, p);
+          auditMainMenu("auth_data_saved", { permissions: p ? p.split(",").map((x) => x.trim()).filter(Boolean).length : 0 });
+          loadMainMenu().catch(() => {});
           closeModal();
           refreshView().catch(() => {});
         });
+      }
+
+      function renderMainMenuTab(tab) {
+        const menu = state.mainMenu;
+        const panel = document.getElementById("main-menu-panel");
+        if (!menu || !panel) return;
+        state.activeMenuTab = tab;
+
+        if (tab === "system") {
+          panel.innerHTML = `<div class="space-y-3"><div class="rounded-2xl border bg-white p-4"><div class="text-xs text-slate-500">Systemweit</div><div class="mt-1 text-lg font-semibold">${esc(menu.system?.appName || "Ahlert ERP")}</div><div class="mt-1 text-sm text-slate-600">${esc(menu.system?.brandClaim || "")}</div><div class="mt-3 grid grid-cols-1 gap-2 text-xs text-slate-500 sm:grid-cols-2"><div>Serverzeit ${esc(fmtDateTime(menu.system?.serverTime))}</div><div>Aktive Ansicht ${esc(menu.system?.activeView || "dashboard")}</div><div>${esc(menu.system?.moduleCount || 0)} Module freigegeben</div><div>Nutzung für Tablet optimiert</div></div></div></div>`;
+        } else if (tab === "user") {
+          panel.innerHTML = `<div class="space-y-3"><div class="rounded-2xl border bg-white p-4"><div class="text-xs text-slate-500">Anmeldedaten</div><div class="mt-1 text-lg font-semibold">${esc(menu.user?.username || "—")}</div><div class="mt-1 text-sm text-slate-600">ID ${esc(menu.user?.id || "—")} · Modus ${esc(menu.user?.mode || "—")}</div><div class="mt-3 flex flex-wrap gap-2">${(menu.user?.permissions || []).map((p) => badge(p, "bg-emerald-100 text-emerald-800")).join("") || badge("keine Rechte")}</div><button id="btn-open-auth-settings" class="mt-4 min-h-[44px] w-full rounded-xl border bg-white px-3 text-sm font-medium">Zugang bearbeiten</button></div></div>`;
+        } else {
+          panel.innerHTML = `<div class="grid grid-cols-1 gap-3 sm:grid-cols-2">${(menu.modules || []).map((m) => `<button data-menu-view="${esc(m.view)}" data-menu-key="${esc(m.key)}" class="rounded-2xl border bg-white p-4 text-left hover:bg-slate-50"><div class="text-xs text-slate-500">Freigegebenes Modul</div><div class="mt-1 text-base font-semibold">${esc(m.label)}</div><div class="mt-1 text-xs text-slate-600">${esc(m.moduleKey || "")}</div></button>`).join("") || `<div class="rounded-2xl border bg-white p-4 text-sm text-slate-600">Keine freigegebenen Module.</div>`}</div>`;
+        }
+
+        for (const b of document.querySelectorAll("[data-menu-tab]")) {
+          b.className = `min-h-[44px] whitespace-nowrap rounded-xl border px-3 text-sm font-medium ${b.getAttribute("data-menu-tab") === tab ? "border-slate-900 bg-slate-900 text-white" : "bg-white hover:bg-slate-50"}`;
+        }
+
+        const authBtn = document.getElementById("btn-open-auth-settings");
+        if (authBtn) {
+          authBtn.addEventListener("click", () => {
+            auditMainMenu("auth_data_viewed", { sectionKey: "user" });
+            openAuthSettings();
+          });
+        }
+
+        for (const b of document.querySelectorAll("[data-menu-view]")) {
+          b.addEventListener("click", () => {
+            auditMainMenu("menu_item_opened", {
+              sectionKey: "modules",
+              menuKey: b.getAttribute("data-menu-key"),
+              menuLabel: b.textContent.trim(),
+            });
+            closeModal();
+            setView(b.getAttribute("data-menu-view"));
+          });
+        }
+      }
+
+      async function openMainMenu() {
+        const menu = state.mainMenu || (await loadMainMenu());
+        openModal(
+          "Hauptmenü",
+          `
+          <div class="space-y-4">
+            <div class="rounded-2xl bg-slate-900 p-4 text-white">
+              <div class="text-xs uppercase tracking-wide text-slate-300">Ahlert ERP</div>
+              <div class="mt-1 text-xl font-semibold">Verwertung. Kanal. Brennstoffe.</div>
+              <div class="mt-1 text-sm text-slate-300">Zentrale Menüoberfläche für System, Anmeldung und freigegebene Module.</div>
+            </div>
+            <div class="flex gap-2 overflow-auto sm:grid sm:grid-cols-3">
+              <button data-menu-tab="system" class="min-h-[44px] whitespace-nowrap rounded-xl border bg-white px-3 text-sm font-medium">System</button>
+              <button data-menu-tab="user" class="min-h-[44px] whitespace-nowrap rounded-xl border bg-white px-3 text-sm font-medium">Anmeldung</button>
+              <button data-menu-tab="modules" class="min-h-[44px] whitespace-nowrap rounded-xl border bg-white px-3 text-sm font-medium">Module</button>
+            </div>
+            <div id="main-menu-panel"></div>
+          </div>
+          `,
+        );
+        auditMainMenu("menu_opened", { sectionKey: "root", meta: { moduleCount: menu.modules?.length || 0 } });
+        renderMainMenuTab(state.activeMenuTab || "system");
+        for (const b of document.querySelectorAll("[data-menu-tab]")) {
+          b.addEventListener("click", () => {
+            const tab = b.getAttribute("data-menu-tab");
+            auditMainMenu(tab === "user" ? "auth_data_viewed" : "menu_section_opened", { sectionKey: tab });
+            renderMainMenuTab(tab);
+          });
+        }
+      }
+
+      document.getElementById("btn-settings").addEventListener("click", () => {
+        openMainMenu().catch(() => openAuthSettings());
       });
 
       const today = new Date();
@@ -1749,6 +1925,7 @@
       }
       if (!document.getElementById("disp-route-start").value) document.getElementById("disp-route-start").value = routeStartLocal;
 
+      loadMainMenu().catch(() => {});
       setView("dashboard");
       connectStream();
     </script>

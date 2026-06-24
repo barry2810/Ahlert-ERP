@@ -36,6 +36,14 @@ services:
       REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL}
       ERP_ALLOW_INSECURE_HEADERS: "true"
+      ERP_SERVICE_NAME: ahlert-erp-api
+      DEPLOYMENT_ENVIRONMENT: local
+      OTEL_ENABLED: "true"
+      OTEL_SERVICE_NAME: ahlert-erp-api
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+      OTEL_TRACES_EXPORTER: otlp
+      OTEL_METRICS_EXPORTER: none
       ERP_HTTPS_PROXY: ${ERP_HTTPS_PROXY}
       ERP_EXTRA_CA_PEM_PATH: ${ERP_EXTRA_CA_PEM_PATH}
       ERP_EXTRA_CA_PEM_BASE64: ${ERP_EXTRA_CA_PEM_BASE64}
@@ -48,7 +56,7 @@ services:
 
   worker:
     build: ./apps/api
-    command: ["node", "/app/server.mjs", "worker"]
+    command: ["node", "--import", "/app/otel.mjs", "/app/server.mjs", "worker"]
     volumes:
       - ./import:/import:ro
     environment:
@@ -56,6 +64,14 @@ services:
       REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL}
       ERP_ALLOW_INSECURE_HEADERS: "true"
+      ERP_SERVICE_NAME: ahlert-erp-worker
+      DEPLOYMENT_ENVIRONMENT: local
+      OTEL_ENABLED: "true"
+      OTEL_SERVICE_NAME: ahlert-erp-worker
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+      OTEL_TRACES_EXPORTER: otlp
+      OTEL_METRICS_EXPORTER: none
       ERP_HTTPS_PROXY: ${ERP_HTTPS_PROXY}
       ERP_EXTRA_CA_PEM_PATH: ${ERP_EXTRA_CA_PEM_PATH}
       ERP_EXTRA_CA_PEM_BASE64: ${ERP_EXTRA_CA_PEM_BASE64}
@@ -90,3 +106,110 @@ services:
       - api
 #      - web
     restart: unless-stopped
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.105.0
+    command: ["--config=/etc/otelcol-contrib/config.yml"]
+    volumes:
+      - ./observability/otel-collector.yml:/etc/otelcol-contrib/config.yml:ro
+    ports:
+      - "4318:4318"
+      - "4317:4317"
+      - "8889:8889"
+    restart: unless-stopped
+
+  tempo:
+    image: grafana/tempo:2.4.1
+    command: ["-config.file=/etc/tempo.yml"]
+    volumes:
+      - ./observability/tempo.yml:/etc/tempo.yml:ro
+      - tempo-data:/tmp/tempo
+    ports:
+      - "3200:3200"
+    restart: unless-stopped
+
+  loki:
+    image: grafana/loki:3.0.0
+    command: ["-config.file=/etc/loki.yml"]
+    volumes:
+      - ./observability/loki.yml:/etc/loki.yml:ro
+      - loki-data:/loki
+    ports:
+      - "3100:3100"
+    restart: unless-stopped
+
+  promtail:
+    image: grafana/promtail:3.0.0
+    command: ["-config.file=/etc/promtail.yml"]
+    volumes:
+      - ./observability/promtail.yml:/etc/promtail.yml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - promtail-data:/tmp
+    depends_on:
+      - loki
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v2.53.1
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.path=/prometheus", "--web.enable-lifecycle"]
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/prometheus-alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    depends_on:
+      - alertmanager
+    restart: unless-stopped
+
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    command: ["--config.file=/etc/alertmanager/alertmanager.yml", "--storage.path=/alertmanager"]
+    volumes:
+      - ./observability/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager-data:/alertmanager
+    ports:
+      - "9093:9093"
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.0.0
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./observability/grafana-datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml:ro
+    ports:
+      - "3001:3000"
+    depends_on:
+      - prometheus
+      - loki
+      - tempo
+    restart: unless-stopped
+
+  node-exporter:
+    image: prom/node-exporter:v1.8.1
+    ports:
+      - "9100:9100"
+    restart: unless-stopped
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    ports:
+      - "8080:8080"
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+    restart: unless-stopped
+
+volumes:
+  tempo-data:
+  loki-data:
+  promtail-data:
+  prometheus-data:
+  alertmanager-data:
+  grafana-data:

@@ -1,0 +1,64 @@
+groups:
+  - name: api
+    rules:
+      - alert: ApiDown
+        expr: up{job="api"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "API ist nicht erreichbar"
+          description: "Prometheus kann api:3000 nicht scrapen."
+
+      - alert: ApiHighErrorRate
+        expr: |
+          (
+            sum(rate(ahlert_http_requests_total{status=~"5.."}[5m]))
+            /
+            sum(rate(ahlert_http_requests_total[5m]))
+          ) > 0.05
+        for: 5m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "Hohe 5xx Fehlerrate"
+          description: "Mehr als 5% 5xx über 5 Minuten."
+
+      - alert: ApiHighLatencyP95
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum(rate(ahlert_http_request_duration_ms_bucket[5m])) by (le)
+          ) > 1000
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Hohe Latenz (p95)"
+          description: "p95 > 1000ms über 5 Minuten."
+
+  - name: infra
+    rules:
+      - alert: ContainerCpuHigh
+        expr: rate(container_cpu_usage_seconds_total[5m]) > 1.5
+        for: 10m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Hohe Container CPU"
+          description: "Mindestens ein Container nutzt dauerhaft >1.5 CPU-Sekunden/Sekunde."
+
+      - alert: HostMemoryHigh
+        expr: (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) < 0.10
+        for: 10m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Wenig RAM verfügbar"
+          description: "Verfügbarer RAM < 10%."
+

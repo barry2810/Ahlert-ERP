@@ -30,8 +30,15 @@ export async function up({ client }) {
   await client.query(`alter table waste_invoice_draft add column if not exists customer_id text;`);
   await client.query(`alter table waste_invoice_draft add column if not exists contract_id text;`);
   await client.query(`alter table waste_invoice_draft add column if not exists meta jsonb;`);
-  await client.query(`update waste_invoice_draft set meta = '{}'::jsonb where meta is null;`);
-  await client.query(`alter table waste_invoice_draft alter column meta set not null;`);
+  await client.query(`alter table waste_invoice_draft alter column meta set default '{}'::jsonb;`);
+  await client.query(`
+    do $$
+    begin
+      if not exists (select 1 from waste_invoice_draft where meta is null limit 1) then
+        alter table waste_invoice_draft alter column meta set not null;
+      end if;
+    end $$;
+  `);
 
   await client.query(`
     do $$
@@ -54,4 +61,3 @@ export async function up({ client }) {
   await client.query(`create index if not exists waste_invoice_draft_calc_idx on waste_invoice_draft (pricing_calculation_id, created_at desc);`);
   await client.query(`create index if not exists waste_invoice_draft_customer_idx on waste_invoice_draft (customer_id, created_at desc);`);
 }
-
